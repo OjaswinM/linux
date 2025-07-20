@@ -731,6 +731,7 @@ enum {
  * Look EXT4_MAP_QUERY_LAST_IN_LEAF.
  */
 #define EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF	0x1000
+#define EXT4_GET_BLOCKS_EXTSIZE		0x2000
 
 /*
  * The bit position of these flags must not overlap with any of the
@@ -750,7 +751,8 @@ enum {
  */
 #define EXT4_EX_QUERY_FILTER	(EXT4_EX_NOCACHE | EXT4_EX_FORCE_CACHE |\
 				 EXT4_EX_NOFAIL |\
-				 EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF)
+				 EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF |\
+				 EXT4_GET_BLOCKS_EXTSIZE)
 
 /*
  * Flags used by ext4_free_blocks
@@ -3767,7 +3769,8 @@ struct ext4_extent;
 extern void ext4_ext_tree_init(handle_t *handle, struct inode *inode);
 extern int ext4_ext_index_trans_blocks(struct inode *inode, int extents);
 extern int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
-			       struct ext4_map_blocks *map, int flags);
+			       struct ext4_map_blocks *orig_map,
+			       struct ext4_map_blocks *extsize_map, int flags);
 extern int ext4_ext_truncate(handle_t *, struct inode *);
 extern int ext4_ext_remove_space(struct inode *inode, ext4_lblk_t start,
 				 ext4_lblk_t end);
