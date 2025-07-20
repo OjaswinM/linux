@@ -772,6 +772,41 @@ static inline void ext4_extsize_reset_map(struct ext4_map_blocks *map,
 	map->m_flags = 0;
 }
 
+static int ext4_map_blocks_extsize(handle_t *handle, struct inode *inode,
+		    struct ext4_map_blocks *map, int flags)
+{
+	int orig_mlen = map->m_len;
+	int ret = 0;
+	int tmp_flags;
+
+	WARN_ON(!ext4_inode_get_extsize(EXT4_I(inode)));
+	WARN_ON(!(flags & EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT));
+
+	/*
+	 * First check if there are any existing allocations
+	 */
+	ret = ext4_map_blocks(handle, inode, map, 0);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * the present mapping fully covers the requested range. In this
+	 * case just go for a non extsize based allocation. Note that we won't
+	 * really be allocating new blocks but the call to ext4_map_blocks is
+	 * important to ensure things like extent splitting and proper map flags
+	 * are taken care of. For all other cases, just let ext4_map_blocks handle
+	 * the allocations
+	 */
+	if (ret > 0 && map->m_len == orig_mlen)
+		tmp_flags = flags & ~EXT4_GET_BLOCKS_EXTSIZE;
+	else
+		tmp_flags = flags;
+
+	ret = ext4_map_blocks(handle, inode, map, tmp_flags);
+
+	return ret;
+}
+
 /*
  * The ext4_map_blocks() function tries to look up the requested blocks,
  * and returns if the blocks are already mapped.
@@ -1153,8 +1188,12 @@ static int _ext4_get_block(struct inode *inode, sector_t iblock,
 	map.m_lblk = iblock;
 	map.m_len = orig_mlen;
 
-	ret = ext4_map_blocks(ext4_journal_current_handle(), inode, &map,
-			      flags);
+	if ((flags & EXT4_GET_BLOCKS_CREATE) && ext4_should_use_extsize(inode))
+		ret = ext4_map_blocks_extsize(ext4_journal_current_handle(), inode,
+				      &map, flags);
+	else
+		ret = ext4_map_blocks(ext4_journal_current_handle(), inode,
+				      &map, flags);
 	if (ret > 0) {
 		map_bh(bh, inode->i_sb, map.m_pblk);
 		ext4_update_bh_state(bh, map.m_flags);
@@ -4012,6 +4051,8 @@ retry:
 	if (flags & IOMAP_ATOMIC)
 		ret = ext4_map_blocks_atomic_write(handle, inode, map, m_flags,
 						   &force_commit);
+	else if (ext4_should_use_extsize(inode))
+		ret = ext4_map_blocks_extsize(handle, inode, map, m_flags);
 	else
 		ret = ext4_map_blocks(handle, inode, map, m_flags);
 
