@@ -207,6 +207,8 @@ enum criteria {
 #define EXT4_MB_USE_RESERVED		0x2000
 /* Do strict check for free blocks while retrying block allocation */
 #define EXT4_MB_STRICT_CHECK		0x4000
+/* mballoc will try to align physical start to length (aka natural alignment) */
+#define EXT4_MB_HINT_ALIGNED		0x8000
 
 struct ext4_allocation_request {
 	/* target inode for block we're allocating */
