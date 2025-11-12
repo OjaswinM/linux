@@ -1816,7 +1816,15 @@ int generic_atomic_write_valid(struct kiocb *iocb, struct iov_iter *iter)
 		return -EINVAL;
 
 	if (!(iocb->ki_flags & IOCB_DIRECT))
-		return -EOPNOTSUPP;
+		/*
+		 * If the user buffer of atomic write crosses page boundary,
+		 * there's a possibility of short write, example if 1 user page
+		 * could not be faulted or got reclaimed before the copy
+		 * operation. For now don't allow such a scenario by ensuring
+		 * user buffer is page aligned.
+		 */
+		if (!PAGE_ALIGNED(iov_iter_alignment(iter)))
+			return -EOPNOTSUPP;
 
 	return 0;
 }

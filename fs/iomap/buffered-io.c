@@ -929,11 +929,13 @@ static int iomap_write_begin(struct iomap_iter *iter,
 {
 	const struct iomap *srcmap = iomap_iter_srcmap(iter);
 	loff_t pos;
-	u64 len = min_t(u64, SIZE_MAX, iomap_length(iter));
+	u64 orig_len = min_t(u64, SIZE_MAX, iomap_length(iter));
+	u64 len;
 	struct folio *folio;
 	int status = 0;
+	bool is_atomic = iter->flags & IOMAP_ATOMIC;
 
-	len = min_not_zero(len, *plen);
+	len = min_not_zero(orig_len, *plen);
 	*foliop = NULL;
 	*plen = 0;
 
@@ -1000,6 +1002,11 @@ static int iomap_write_begin(struct iomap_iter *iter,
 
 	if (unlikely(status))
 		goto out_unlock;
+
+	if (is_atomic && (len != orig_len)) {
+		status = -EINVAL;
+		goto out_unlock;
+	}
 
 	*foliop = folio;
 	*plen = len;
@@ -1203,6 +1210,8 @@ iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *i,
 		iter.flags |= IOMAP_NOWAIT;
 	if (iocb->ki_flags & IOCB_DONTCACHE)
 		iter.flags |= IOMAP_DONTCACHE;
+	if (iocb->ki_flags & IOCB_ATOMIC)
+		iter.flags |= IOMAP_ATOMIC;
 
 	while ((ret = iomap_iter(&iter, ops)) > 0)
 		iter.status = iomap_write_iter(&iter, i, write_ops);
