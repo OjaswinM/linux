@@ -3850,7 +3850,17 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	ee_block = le32_to_cpu(ex->ee_block);
 	ee_len = ext4_ext_get_actual_len(ex);
 
-	if (flags & (EXT4_GET_BLOCKS_UNWRIT_EXT |
+	/* Convert to unwritten */
+	if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN) {
+		/*
+		 * It is safe to convert extent to uninitialized via explicit
+		 * zeroout only if extent is fully inside i_size or new_size.
+		 */
+		split_flag |= ee_block + ee_len <= eof_block ?
+			      EXT4_EXT_MAY_ZEROOUT : 0;
+
+	/* Split the existing unwritten extent */
+	} else if (flags & (EXT4_GET_BLOCKS_UNWRIT_EXT |
 			    EXT4_GET_BLOCKS_CONVERT)) {
 		/*
 		 * It is safe to convert extent to initialized via explicit
