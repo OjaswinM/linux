@@ -43,7 +43,6 @@
 #include "ext4.h"
 #include "ext4_extents.h"
 
-#define EX_LEAF_PBLK 1000
 #define EX_DATA_PBLK 100
 #define EX_DATA_LBLK 10
 #define EX_DATA_LEN 3
@@ -204,8 +203,8 @@ static int ext4_issue_zeroout_stub(struct inode *inode, ext4_lblk_t lblk,
 	kunit_log(KERN_ALERT, test,
 		  "%s: lblk=%u pblk=%llu len=%u", __func__, lblk, pblk, len);
 	KUNIT_EXPECT_EQ(test, 1, lblk >= EX_DATA_LBLK);
-	KUNIT_EXPECT_EQ(test, 1,
-			lblk + len <= EX_DATA_LBLK + EX_DATA_LEN);
+	KUNIT_EXPECT_EQ(test, 1, lblk + len <= EX_DATA_LBLK + EX_DATA_LEN);
+	KUNIT_EXPECT_EQ(test, 1, lblk - EX_DATA_LBLK == pblk - EX_DATA_PBLK);
 
 	off_blk = lblk - EX_DATA_LBLK;
 	off_bytes = off_blk << inode->i_sb->s_blocksize_bits;
@@ -267,7 +266,7 @@ static int extents_kunit_init(struct kunit *test)
 	 */
 	EXT_FIRST_EXTENT(eh)->ee_block = cpu_to_le32(EX_DATA_LBLK);
 	EXT_FIRST_EXTENT(eh)->ee_len = cpu_to_le16(EX_DATA_LEN);
-	ext4_ext_store_pblock(EXT_FIRST_EXTENT(eh), EX_LEAF_PBLK);
+	ext4_ext_store_pblock(EXT_FIRST_EXTENT(eh), EX_DATA_PBLK);
 	if (!param || param->is_unwrit_at_start)
 		ext4_ext_mark_unwritten(EXT_FIRST_EXTENT(eh));
 
