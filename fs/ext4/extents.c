@@ -3204,10 +3204,10 @@ static struct ext4_ext_path *ext4_split_extent_at(handle_t *handle,
 {
 	ext4_fsblk_t newblock;
 	ext4_lblk_t ee_block;
-	struct ext4_extent *ex, newex, orig_ex, zero_ex;
+	struct ext4_extent *ex, newex, orig_ex;
 	struct ext4_extent *ex2 = NULL;
 	unsigned int ee_len, depth;
-	int err = 0;
+	int err = 0, insert_err = 0;
 
 	BUG_ON((split_flag & EXT4_EXT_DATA_VALID1) == EXT4_EXT_DATA_VALID1);
 	BUG_ON((split_flag & EXT4_EXT_DATA_VALID1) &&
@@ -3277,11 +3277,10 @@ static struct ext4_ext_path *ext4_split_extent_at(handle_t *handle,
 
 	path = ext4_ext_insert_extent(handle, inode, path, &newex, flags);
 	if (!IS_ERR(path))
-		goto out;
+		return path;
 
-	err = PTR_ERR(path);
-	if (err != -ENOSPC && err != -EDQUOT && err != -ENOMEM)
-		goto out_path;
+	insert_err = PTR_ERR(path);
+	err = 0;
 
 	/*
 	 * Get a new path to try to zeroout or fix the extent length.
@@ -3297,53 +3296,13 @@ static struct ext4_ext_path *ext4_split_extent_at(handle_t *handle,
 				 split, PTR_ERR(path));
 		goto out_path;
 	}
+
+	err = ext4_ext_get_access(handle, inode, path + depth);
+	if (err)
+		goto out;
+
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
-
-	if (EXT4_EXT_MAY_ZEROOUT & split_flag) {
-		if (split_flag & EXT4_EXT_DATA_VALID1)
-			memcpy(&zero_ex, ex2, sizeof(zero_ex));
-		else if (split_flag & EXT4_EXT_DATA_VALID2)
-			memcpy(&zero_ex, ex, sizeof(zero_ex));
-		else
-			memcpy(&zero_ex, &orig_ex, sizeof(zero_ex));
-		ext4_ext_mark_initialized(&zero_ex);
-
-		err = ext4_ext_zeroout(inode, &zero_ex);
-		if (err)
-			goto fix_extent_len;
-
-		/*
-		 * The first half contains partially valid data, the splitting
-		 * of this extent has not been completed, fix extent length
-		 * and ext4_split_extent() split will the first half again.
-		 */
-		if (split_flag & EXT4_EXT_DATA_PARTIAL_VALID1) {
-			/*
-			 * Drop extent cache to prevent stale unwritten
-			 * extents remaining after zeroing out.
-			 */
-			ext4_es_remove_extent(inode,
-					le32_to_cpu(zero_ex.ee_block),
-					ext4_ext_get_actual_len(&zero_ex));
-			goto fix_extent_len;
-		}
-
-		/* update the extent length and mark as initialized */
-		ex->ee_len = cpu_to_le16(ee_len);
-		ext4_ext_try_to_merge(handle, inode, path, ex);
-		err = ext4_ext_dirty(handle, inode, path + path->p_depth);
-		if (!err)
-			/* update extent status tree */
-			ext4_zeroout_es(inode, &zero_ex);
-		/*
-		 * If we failed at this point, we don't know in which
-		 * state the extent tree exactly is so don't try to fix
-		 * length of the original extent as it may do even more
-		 * damage.
-		 */
-		goto out;
-	}
 
 fix_extent_len:
 	ex->ee_len = orig_ex.ee_len;
@@ -3353,9 +3312,9 @@ fix_extent_len:
 	 */
 	ext4_ext_dirty(handle, inode, path + path->p_depth);
 out:
-	if (err) {
+	if (err || insert_err) {
 		ext4_free_ext_path(path);
-		path = ERR_PTR(err);
+		path = err ? ERR_PTR(err) : ERR_PTR(insert_err);
 	}
 out_path:
 	if (IS_ERR(path))
@@ -3388,6 +3347,7 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 	unsigned int ee_len, depth;
 	int unwritten;
 	int split_flag1, flags1;
+	int err = 0, orig_err;
 
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
@@ -3410,8 +3370,15 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 				       EXT4_EXT_DATA_ENTIRE_VALID1;
 		path = ext4_split_extent_at(handle, inode, path,
 				map->m_lblk + map->m_len, split_flag1, flags1);
-		if (IS_ERR(path))
-			return path;
+
+		if (IS_ERR(path)) {
+			orig_err = PTR_ERR(path);
+			if (orig_err != -ENOSPC && orig_err != -EDQUOT &&
+			    orig_err != -ENOMEM)
+				return path;
+			else
+				goto try_zeroout;
+		}
 		/*
 		 * Update path is required because previous ext4_split_extent_at
 		 * may result in split of original leaf or extent zeroout.
@@ -3437,11 +3404,152 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 			split_flag1 |= split_flag & (EXT4_EXT_MAY_ZEROOUT |
 						     EXT4_EXT_MARK_UNWRIT2);
 		}
-		path = ext4_split_extent_at(handle, inode, path,
-				map->m_lblk, split_flag1, flags);
+		path = ext4_split_extent_at(handle, inode, path, map->m_lblk,
+					    split_flag1, flags);
+
+		if (IS_ERR(path)) {
+			orig_err = PTR_ERR(path);
+			if (orig_err != -ENOSPC && orig_err != -EDQUOT &&
+			    orig_err != -ENOMEM)
+				return path;
+			else
+				goto try_zeroout;
+		}
+	}
+
+	if (!err)
+		goto out;
+
+try_zeroout:
+	/*
+	 * There was an error in splitting the extent, just zeroout and convert
+	 * to initialize as a last resort
+	 */
+	if (split_flag & EXT4_EXT_MAY_ZEROOUT) {
+		uint64_t lblk, pblk, len;
+		unsigned int orig_ee_block = ee_block, orig_ee_len = ee_len;
+		int is_unwrit;
+		int err = 0;
+
+		path = ext4_find_extent(inode, map->m_lblk, NULL, flags);
 		if (IS_ERR(path))
 			return path;
+		depth = ext_depth(inode);
+		ex = path[depth].p_ext;
+		ee_block = le32_to_cpu(ex->ee_block);
+		ee_len = ext4_ext_get_actual_len(ex);
+		is_unwrit = ext4_ext_is_unwritten(ex);
+
+		if (WARN_ON((ee_block != orig_ee_block ||
+			     ee_len != orig_ee_len))) {
+			/*
+			 * The extent to zerout should have been unchange
+			 * but its not, just return error to caller
+			 */
+			return ERR_PTR(orig_err);
+		}
+
+		if (flags & EXT4_GET_BLOCKS_CONVERT) {
+			/*
+			 * EXT4_GET_BLOCKS_CONVERT: Caller wants the range specified by
+			 * map to be initialized. Zeroout everything everything except
+			 * the map range.
+			 */
+
+			loff_t map_end = (loff_t)map->m_lblk + map->m_len;
+			loff_t ex_end = (loff_t)ee_block + ee_len;
+
+			if (!is_unwrit)
+				/* Shouldn't happen. Just exit */
+				return ERR_PTR(orig_err);
+
+			/* zeroout left */
+			if (map->m_lblk > ee_block) {
+				lblk = ee_block;
+				len = map->m_lblk - ee_block;
+				pblk = ext4_ext_pblock(ex);
+				if (ext4_issue_zeroout(inode, lblk, pblk, len))
+					/* ZEROOUT failed, just return original error */
+					return ERR_PTR(orig_err);
+			}
+
+			/* zeroout right */
+			if (map->m_lblk + map->m_len < ee_block + ee_len) {
+				lblk = map_end;
+				len = ex_end - map_end;
+				pblk = ext4_ext_pblock(ex) +
+				       (map_end - ee_block);
+				if (ext4_issue_zeroout(inode, lblk, pblk, len))
+					/* ZEROOUT failed, just return original error */
+					return ERR_PTR(orig_err);
+			}
+		} else if (flags & EXT4_GET_BLOCKS_UNWRIT_EXT) {
+			/*
+			 * EXT4_GET_BLOCKS_UNWRIT_EXT: Today, this flag
+			 * implicitly implies that callers when wanting an
+			 * unwritten to unwritten split. So zeroout the whole
+			 * extent.
+			 *
+			 * TODO: THe implicit meaning of the flag is not ideal
+			 * and eventually we should aim for a more well defined
+			 * behavior
+			 */
+
+			if(!is_unwrit)
+				/* Shouldn't happen. Just exit */
+				return ERR_PTR(orig_err);
+
+			lblk = ee_block;
+			len = ee_len;
+			pblk = ext4_ext_pblock(ex);
+			if (ext4_issue_zeroout(inode, lblk, pblk, len))
+				/* ZEROOUT failed, just return original error */
+				return ERR_PTR(orig_err);
+		} else if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN) {
+			/*
+			 * EXT4_GET_BLOCKS_CONVERT_UNWRITTEN: Caller wants the
+			 * range specified by map to be marked unwritten.
+			 * Zeroout the map range leaving rest as it is.
+			 */
+
+			if(is_unwrit)
+				/* Shouldn't happen. Just exit */
+				return ERR_PTR(orig_err);
+
+			lblk = map->m_lblk;
+			len = map->m_len;
+			pblk = ext4_ext_pblock(ex) + (map->m_lblk - ee_block);
+			if (ext4_issue_zeroout(inode, lblk, pblk, len))
+				/* ZEROOUT failed, just return original error */
+				return ERR_PTR(orig_err);
+		}
+
+		/*
+		 * /\* Zeroout succeeded, mark the extent as initialized *\/
+		 * path = ext4_find_extent(inode, ee_block, NULL,
+		 * 			flags | EXT4_EX_NOFAIL);
+		 */
+		/*
+		 * if (IS_ERR(path))
+		 * 	    return path;
+		 */
+
+		err = ext4_ext_get_access(handle, inode, path + depth);
+		if (err)
+			return ERR_PTR(err);
+
+		ex->ee_len = cpu_to_le16(ee_len);
+
+		ext4_ext_dirty(handle, inode, path + path->p_depth);
+		if (err)
+			return ERR_PTR(err);
+
 	}
+
+	/* There's an error and we can't zeroout, just return the err */
+	return ERR_PTR(orig_err);
+
+out:
 
 	if (allocated) {
 		if (map->m_lblk + map->m_len > ee_block + ee_len)
