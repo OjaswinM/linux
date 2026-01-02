@@ -542,8 +542,8 @@ static int ext4_map_query_blocks_next_in_leaf(handle_t *handle,
 	return map->m_len;
 }
 
-static int ext4_map_query_blocks(handle_t *handle, struct inode *inode,
-				 struct ext4_map_blocks *map, int flags)
+int ext4_map_query_blocks(handle_t *handle, struct inode *inode,
+			  struct ext4_map_blocks *map, int flags)
 {
 	unsigned int status;
 	int retval;
@@ -589,7 +589,7 @@ out:
 	return retval;
 }
 
-static int ext4_map_create_blocks(handle_t *handle, struct inode *inode,
+int ext4_map_create_blocks(handle_t *handle, struct inode *inode,
 				  struct ext4_map_blocks *map, int flags)
 {
 	unsigned int status;
