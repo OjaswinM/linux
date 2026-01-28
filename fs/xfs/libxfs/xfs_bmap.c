@@ -2866,6 +2866,219 @@ done:
 }
 
 /*
+ * Split an extent
+ */
+static int	/* error */
+xfs_bmap_split_cow_extent(
+	struct xfs_inode	*ip,	/* incore inode pointer */
+	struct xfs_iext_cursor	*icur,
+	xfs_filblks_t		off,
+	xfs_filblks_t		len)
+{
+	int			error;	/* error return value */
+	struct xfs_ifork	*ifp;	/* inode fork pointer */
+	xfs_fileoff_t		new_endoff;	/* end offset of new entry */
+	uint32_t		state = BMAP_COWFORK;
+	struct xfs_mount	*mp = ip->i_mount;
+	int64_t			da_old = 0, da_new = 0;
+	bool			is_delayed;
+	xfs_bmbt_irec_t		old;
+	xfs_bmbt_irec_t		new;
+	int			whichfork = XFS_COW_FORK;
+
+	ifp = xfs_ifork_ptr(ip, whichfork);
+
+	XFS_STATS_INC(mp, xs_add_exlist);
+
+	/*
+	 * Set up a bunch of variables to make the tests simpler.
+	 */
+	error = 0;
+	xfs_iext_get_extent(ifp, icur, &old);
+	is_delayed = isnullstartblock(old.br_startblock);
+	if (is_delayed)
+		da_old = startblockval(old.br_startblock);
+	new_endoff = off + len;
+	if (off < old.br_startoff ||
+	    (off + len) > (old.br_startoff + old.br_blockcount)) {
+		ASSERT(0);
+		/* split range should completely fall in the extent */
+		return -EINVAL;
+	}
+
+	/*
+	 * Set flags determining what part of the previous oldext allocation
+	 * extent is being replaced by a newext allocation.
+	 */
+	if (old.br_startoff == off)
+		state |= BMAP_LEFT_FILLING;
+	if (old.br_startoff + old.br_blockcount == new_endoff)
+		state |= BMAP_RIGHT_FILLING;
+
+	new.br_startoff = off;
+	new.br_blockcount = len;
+	new.br_state = old.br_state;
+	new.br_flags = old.br_flags;
+
+	/*
+	 * Split based on FILLING state. For delayed allocation we need to
+	 * recalculate the indirect blocks needed.
+	 */
+	switch (state & (BMAP_LEFT_FILLING | BMAP_RIGHT_FILLING)) {
+
+	case BMAP_LEFT_FILLING | BMAP_RIGHT_FILLING:
+		/*
+		 * The present extent is already equal to our new extent,
+		 * no need for a split.
+		 */
+		break;
+
+	case BMAP_LEFT_FILLING:
+		/*
+		 * Setting the first part of a previous oldext extent to newext.
+		 */
+
+		if (is_delayed) {
+			new.br_startblock = nullstartblock(
+				xfs_bmap_worst_indlen(ip, new.br_blockcount));
+			da_new += startblockval(new.br_startblock);
+		} else
+			new.br_startblock = old.br_startblock;
+
+		old.br_startoff += len;
+		old.br_blockcount -= len;
+		if (is_delayed) {
+			old.br_startblock = nullstartblock(
+				xfs_bmap_worst_indlen(ip, old.br_blockcount));
+			da_new += startblockval(old.br_startblock);
+		} else
+			old.br_startblock += len;
+
+		xfs_iext_update_extent(ip, state, icur, &old);
+		xfs_iext_insert(ip, icur, &new, state);
+		ifp->if_nextents++;
+
+		break;
+
+	case BMAP_RIGHT_FILLING:
+		/*
+		 * Setting the last part of a previous oldext extent to newext.
+		 */
+
+		old.br_blockcount -= len;
+		if (is_delayed) {
+			old.br_startblock = nullstartblock(
+				xfs_bmap_worst_indlen(ip, old.br_blockcount));
+			da_new += startblockval(old.br_startblock);
+		}
+		xfs_iext_update_extent(ip, state, icur, &old);
+
+		if (is_delayed) {
+			new.br_startblock =
+				nullstartblock(xfs_bmap_worst_indlen(ip, len));
+			da_new += startblockval(new.br_startblock);
+		}
+		else
+			new.br_startblock =
+				old.br_startblock + old.br_blockcount;
+
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, &new, state);
+		ifp->if_nextents++;
+
+		break;
+
+	case 0:
+		/*
+		 * Setting the middle part of a previous oldext extent to
+		 * newext. One extent becomes three extents.
+		 */
+		struct xfs_bmbt_irec new_right;
+		xfs_filblks_t orig_end = old.br_startoff + old.br_blockcount;
+
+		/* left extent */
+		old.br_blockcount = new.br_startoff - old.br_startoff;
+		if (is_delayed) {
+			old.br_startblock = nullstartblock(
+				xfs_bmap_worst_indlen(ip, old.br_blockcount));
+			da_new += startblockval(old.br_startblock);
+		}
+		xfs_iext_update_extent(ip, state, icur, &old);
+
+		/* middle extent */
+		if (is_delayed) {
+			new.br_startblock =
+				nullstartblock(xfs_bmap_worst_indlen(ip, len));
+			da_new += startblockval(new.br_startblock);
+		} else
+			new.br_startblock =
+				old.br_startblock + old.br_blockcount;
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, &new, state);
+
+		/* right extent */
+		new_right.br_startoff = new.br_startoff + new.br_blockcount;
+		new_right.br_blockcount = orig_end - new_right.br_startoff;
+		if (is_delayed) {
+			new_right.br_startblock = nullstartblock(
+				xfs_bmap_worst_indlen(ip,
+						      new_right.br_blockcount));
+			da_new += startblockval(new_right.br_startblock);
+		} else
+			new_right.br_startblock =
+				new.br_startblock + new.br_blockcount;
+		xfs_iext_next(ifp, icur);
+		xfs_iext_insert(ip, icur, &new_right, state);
+
+		ifp->if_nextents += 2;
+	}
+
+	if (da_new != da_old)
+		xfs_mod_delalloc(ip, 0, da_new - da_old);
+
+	return error;
+}
+
+/*
+ * Mark a COW extent as atomic. The offset_fsb and len must completely lie
+ * within the extent represented by icur
+ */
+int xfs_bmap_mark_range_atomic(
+	struct xfs_inode	*ip,	/* incore inode pointer */
+	struct xfs_iext_cursor	*icur,
+	xfs_filblks_t		off,
+	xfs_filblks_t		len)
+{
+	int			err = 0;
+	xfs_bmbt_irec_t		old;
+	xfs_bmbt_irec_t		cmap;
+	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_COW_FORK);
+	bool			cow_eof;
+
+	xfs_iext_get_extent(ifp, icur, &old);
+	ASSERT(off >= old.br_startoff);
+	ASSERT(off + len <= (old.br_startoff + old.br_blockcount));
+
+	/* Nothing to do */
+	if (xfs_bmbt_is_atomic(&old))
+		return 0;
+
+	err = xfs_bmap_split_cow_extent(ip, icur, off, len);
+	if (err)
+		return err;
+
+	cow_eof = xfs_iext_lookup_extent(ip, ip->i_cowfp, off, icur, &cmap);
+	ASSERT(cow_eof);
+	ASSERT(cmap.br_startoff == off);
+	ASSERT(cmap.br_blockcount == len);
+
+	xfs_bmbt_set_atomic(&cmap);
+	xfs_iext_update_extent(ip, BMAP_COWFORK, icur, &cmap);
+	return 0;
+}
+
+
+/*
  * Functions used in the extent read, allocate and remove paths
  */
 
@@ -4425,6 +4638,7 @@ xfs_bmapi_convert_one_delalloc(
 	uint16_t		flags = 0;
 	struct xfs_trans	*tp;
 	int			error;
+	int			is_atomic = false;
 
 	if (whichfork == XFS_COW_FORK)
 		flags |= IOMAP_F_SHARED;
@@ -4507,6 +4721,8 @@ xfs_bmapi_convert_one_delalloc(
 	if (error)
 		goto out_finish;
 
+	is_atomic = xfs_bmbt_is_atomic(&bma.got);
+
 	XFS_STATS_ADD(mp, xs_xstrat_bytes, XFS_FSB_TO_B(mp, bma.length));
 	XFS_STATS_INC(mp, xs_xstrat_quick);
 
@@ -4516,7 +4732,7 @@ xfs_bmapi_convert_one_delalloc(
 	if (seq)
 		*seq = READ_ONCE(ifp->if_seq);
 
-	if (whichfork == XFS_COW_FORK)
+	if (whichfork == XFS_COW_FORK && !is_atomic)
 		xfs_refcount_alloc_cow_extent(tp, XFS_IS_REALTIME_INODE(ip),
 				bma.blkno, bma.length);
 

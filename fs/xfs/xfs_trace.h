@@ -1788,6 +1788,7 @@ DECLARE_EVENT_CLASS(xfs_imap_class,
 		__field(xfs_fileoff_t, startoff)
 		__field(xfs_fsblock_t, startblock)
 		__field(xfs_filblks_t, blockcount)
+		__field(bool, is_atomic)
 	),
 	TP_fast_assign(
 		__entry->dev = VFS_I(ip)->i_sb->s_dev;
@@ -1799,9 +1800,10 @@ DECLARE_EVENT_CLASS(xfs_imap_class,
 		__entry->startoff = irec ? irec->br_startoff : 0;
 		__entry->startblock = irec ? irec->br_startblock : 0;
 		__entry->blockcount = irec ? irec->br_blockcount : 0;
+		__entry->is_atomic = irec ? irec->br_flags & XFS_BMBT_FLAG_ATOMIC: 0;
 	),
 	TP_printk("dev %d:%d ino 0x%llx disize 0x%llx pos 0x%llx bytecount 0x%zx "
-		  "fork %s startoff 0x%llx startblock 0x%llx fsbcount 0x%llx",
+		  "fork %s startoff 0x%llx startblock 0x%llx fsbcount 0x%llx atomic %u",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->ino,
 		  __entry->size,
@@ -1810,7 +1812,7 @@ DECLARE_EVENT_CLASS(xfs_imap_class,
 		  __print_symbolic(__entry->whichfork, XFS_WHICHFORK_STRINGS),
 		  __entry->startoff,
 		  (int64_t)__entry->startblock,
-		  __entry->blockcount)
+		  __entry->blockcount, __entry->is_atomic)
 )
 
 #define DEFINE_IMAP_EVENT(name)	\
@@ -4020,6 +4022,7 @@ DECLARE_EVENT_CLASS(xfs_inode_irec_class,
 		__field(xfs_extlen_t, len)
 		__field(xfs_fsblock_t, pblk)
 		__field(int, state)
+		__field(bool, is_atomic)
 	),
 	TP_fast_assign(
 		__entry->dev = VFS_I(ip)->i_sb->s_dev;
@@ -4028,14 +4031,16 @@ DECLARE_EVENT_CLASS(xfs_inode_irec_class,
 		__entry->len = irec->br_blockcount;
 		__entry->pblk = irec->br_startblock;
 		__entry->state = irec->br_state;
+		__entry->is_atomic = irec->br_flags & XFS_BMBT_FLAG_ATOMIC;
 	),
-	TP_printk("dev %d:%d ino 0x%llx fileoff 0x%llx fsbcount 0x%x startblock 0x%llx st %d",
+	TP_printk("dev %d:%d ino 0x%llx fileoff 0x%llx fsbcount 0x%x startblock 0x%llx st %d is_atomic %u",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->ino,
 		  __entry->lblk,
 		  __entry->len,
 		  __entry->pblk,
-		  __entry->state)
+		  __entry->state,
+		  __entry->is_atomic)
 );
 #define DEFINE_INODE_IREC_EVENT(name) \
 DEFINE_EVENT(xfs_inode_irec_class, name, \

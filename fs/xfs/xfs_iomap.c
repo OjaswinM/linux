@@ -1475,7 +1475,8 @@ xfs_bmapi_reserve_delalloc(
 	xfs_filblks_t		prealloc,
 	struct xfs_bmbt_irec	*got,
 	struct xfs_iext_cursor	*icur,
-	int			eof)
+	int			eof,
+	bool			is_atomic)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, whichfork);
@@ -1485,8 +1486,9 @@ xfs_bmapi_reserve_delalloc(
 	int			error;
 	xfs_fileoff_t		aoff;
 	bool			use_cowextszhint =
-					whichfork == XFS_COW_FORK && !prealloc;
+					whichfork == XFS_COW_FORK && !prealloc && !is_atomic;
 
+	ASSERT(whichfork == XFS_COW_FORK || !is_atomic);
 retry:
 	/*
 	 * Cap the alloc length. Keep track of prealloc so we know whether to
@@ -1557,6 +1559,8 @@ retry:
 	got->br_startblock = nullstartblock(indlen);
 	got->br_blockcount = alen;
 	got->br_state = XFS_EXT_NORM;
+	if (is_atomic)
+		xfs_bmbt_set_atomic(got);
 
 	xfs_bmap_add_extent_hole_delay(ip, whichfork, icur, got);
 
@@ -1786,6 +1790,7 @@ xfs_buffered_write_iomap_begin(
 	unsigned int		lockmode = XFS_ILOCK_EXCL;
 	unsigned int		iomap_flags = 0;
 	u64			seq;
+	bool is_atomic = flags & IOMAP_ATOMIC;
 
 	if (xfs_is_shutdown(mp))
 		return -EIO;
@@ -1884,7 +1889,7 @@ xfs_buffered_write_iomap_begin(
 	 * themselves.  Second the lookup in the extent list is generally faster
 	 * than going out to the shared extent tree.
 	 */
-	if (xfs_is_cow_inode(ip)) {
+	if (xfs_is_cow_inode(ip) || is_atomic) {
 		if (!ip->i_cowfp) {
 			ASSERT(!xfs_is_reflink_inode(ip));
 			xfs_ifork_init_cow(ip);
@@ -1897,7 +1902,12 @@ xfs_buffered_write_iomap_begin(
 		}
 	}
 
-	if (imap.br_startoff <= offset_fsb) {
+	if (is_atomic) {
+		/*
+		 * Atomic writes always use COW FORK
+		 */
+		allocfork = XFS_COW_FORK;
+	} else if (imap.br_startoff <= offset_fsb) {
 		/*
 		 * For reflink files we may need a delalloc reservation when
 		 * overwriting shared extents.   This includes zeroing of
@@ -1947,7 +1957,8 @@ xfs_buffered_write_iomap_begin(
 			allocfork = XFS_COW_FORK;
 	}
 
-	if (eof && offset + count > XFS_ISIZE(ip)) {
+	/* lets turn off preallocations for atomic IO for now */
+	if (!is_atomic && eof && offset + count > XFS_ISIZE(ip)) {
 		/*
 		 * Determine the initial size of the preallocation.
 		 * We clean up any extra preallocation when the file is closed.
@@ -1988,7 +1999,7 @@ xfs_buffered_write_iomap_begin(
 	if (allocfork == XFS_COW_FORK) {
 		error = xfs_bmapi_reserve_delalloc(ip, allocfork, offset_fsb,
 				end_fsb - offset_fsb, prealloc_blocks, &cmap,
-				&ccur, cow_eof);
+				&ccur, cow_eof, is_atomic);
 		if (error)
 			goto out_unlock;
 
@@ -1998,7 +2009,7 @@ xfs_buffered_write_iomap_begin(
 
 	error = xfs_bmapi_reserve_delalloc(ip, allocfork, offset_fsb,
 			end_fsb - offset_fsb, prealloc_blocks, &imap, &icur,
-			eof);
+			eof, is_atomic);
 	if (error)
 		goto out_unlock;
 
@@ -2020,6 +2031,31 @@ convert_delay:
 	return 0;
 
 found_cow:
+	if (is_atomic && !xfs_bmbt_is_atomic(&cmap)) {
+		/*
+		 * Found cow extent is not atomic so split and convert the
+		 * extent to atomic.
+		 *
+		 * TODO: this assumes cmap covers (offset,len) completely, which
+		 * should always be true cause we only support single block
+		 * buffered atomic writes for now
+		 *
+		 */
+		error = xfs_bmap_mark_range_atomic(ip, &ccur, offset_fsb,
+						  end_fsb - offset_fsb);
+		if (error)
+			goto out_unlock;
+
+		cow_eof = !xfs_iext_lookup_extent(ip, ip->i_cowfp, offset_fsb,
+				&ccur, &cmap);
+		ASSERT(!cow_eof);
+		ASSERT(cmap.br_startoff == offset_fsb);
+		ASSERT(cmap.br_blockcount == end_fsb - offset_fsb);
+
+		xfs_bmbt_set_atomic(&cmap);
+		trace_xfs_reflink_cow_found(ip, &cmap);
+	}
+
 	if (imap.br_startoff <= offset_fsb) {
 		error = xfs_bmbt_to_iomap(ip, srcmap, &imap, flags, 0,
 				xfs_iomap_inode_sequence(ip, 0));

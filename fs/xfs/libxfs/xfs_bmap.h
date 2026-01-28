@@ -229,6 +229,9 @@ int	xfs_bmap_add_extent_unwritten_real(struct xfs_trans *tp,
 		struct xfs_inode *ip, int whichfork,
 		struct xfs_iext_cursor *icur, struct xfs_btree_cur **curp,
 		struct xfs_bmbt_irec *new, int *logflagsp);
+int	xfs_bmap_mark_range_atomic(struct xfs_inode *ip,
+		struct xfs_iext_cursor *icur, xfs_filblks_t off,
+		xfs_filblks_t len);
 xfs_extlen_t xfs_bmapi_minleft(struct xfs_trans *tp, struct xfs_inode *ip,
 		int fork);
 int	xfs_bmap_btalloc_low_space(struct xfs_bmalloca *ap,
