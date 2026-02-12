@@ -123,6 +123,9 @@ static bool iomap_can_add_to_ioend(struct iomap_writepage_ctx *wpc, loff_t pos,
 {
 	struct iomap_ioend *ioend = wpc->wb_ctx;
 
+	if ((ioend_flags & IOMAP_IOEND_NOMERGE) ||
+	    (ioend->io_flags & IOMAP_IOEND_NOMERGE))
+		return false;
 	if (ioend_flags & IOMAP_IOEND_BOUNDARY)
 		return false;
 	if ((ioend_flags & IOMAP_IOEND_MERGESAME_FLAGS) !=
