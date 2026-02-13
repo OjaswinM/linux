@@ -16,6 +16,7 @@
 #include "xfs_trace.h"
 #include "xfs_bmap.h"
 #include "xfs_bmap_util.h"
+#include "xfs_bmap_btree.h"
 #include "xfs_reflink.h"
 #include "xfs_errortag.h"
 #include "xfs_error.h"
@@ -316,6 +317,13 @@ xfs_imap_valid(
 	return true;
 }
 
+static inline void
+xfs_iomap_mark_atomic(
+	struct iomap	*iomap)
+{
+	iomap->flags |= IOMAP_F_ATOMIC_BIO;
+}
+
 static int
 xfs_map_blocks(
 	struct iomap_writepage_ctx *wpc,
@@ -334,6 +342,9 @@ xfs_map_blocks(
 	int			retries = 0;
 	int			error = 0;
 	unsigned int		*seq;
+	bool			need_atomic_bio = false;
+	int			lock_mode = XFS_ILOCK_SHARED;
+	struct xfs_trans	*tp = NULL;
 
 	if (xfs_is_shutdown(mp))
 		return -EIO;
@@ -367,7 +378,7 @@ xfs_map_blocks(
 retry:
 	cow_fsb = NULLFILEOFF;
 	whichfork = XFS_DATA_FORK;
-	xfs_ilock(ip, XFS_ILOCK_SHARED);
+	xfs_ilock(ip, lock_mode);
 	ASSERT(!xfs_need_iread_extents(&ip->i_df));
 
 	/*
@@ -378,8 +389,101 @@ retry:
 	    xfs_iext_lookup_extent(ip, ip->i_cowfp, offset_fsb, &icur, &imap))
 		cow_fsb = imap.br_startoff;
 	if (cow_fsb != NULLFILEOFF && cow_fsb <= offset_fsb) {
+		/*
+		 * For atomic COW ranges, lets try to check if we can perform HW
+		 * accelerated atomic write. This is possible if we already have or
+		 * can guarantee allocation of a data fork mapping that can
+		 * support a HW accelerated atomic write.
+		 */
+		bool found = false, shared = false;
+
+		if (!xfs_bmbt_is_atomic(&imap))
+			goto return_cow;
+
+		if (!xfs_inode_can_hw_atomic_write(ip))
+			goto return_cow;
+
+		/*
+		 * We are dealing with an atomic range. Incase we determing HW
+		 * atomic write is possible we will delete the COW range and
+		 * directly pass the data fork range to iomap with
+		 * IOMAP_F_ATOMIC_BIO set. To delete the COW range we need an
+		 * exclusive lock and a txn, so for simplicity, upgrade the lock
+		 * and start txn early so we don't have to repeat lookups after
+		 * the unlock -> lock operation.
+		 */
+		if (lock_mode != XFS_ILOCK_EXCL) {
+			xfs_iunlock(ip, lock_mode);
+
+			/* Start a rolling transaction to remove the mappings */
+			error = xfs_trans_alloc(ip->i_mount,
+						&M_RES(ip->i_mount)->tr_write,
+						0, 0, 0, &tp);
+			if (error) {
+				/* TODO: retry here */
+				xfs_iunlock(ip, lock_mode);
+				return error;
+			}
+
+
+			lock_mode = XFS_ILOCK_EXCL;
+			goto retry;
+		}
+
+		found = xfs_iext_lookup_extent(ip, &ip->i_df, offset_fsb,
+						  &icur, &imap);
+
+		/* Nothing in data fork */
+		if (!found || imap.br_startoff > offset_fsb)
+			goto return_cow;
+
+		/*
+		 * We can't directly use the data fork extent if it is shared.
+		 */
+		error = xfs_bmap_trim_cow(ip, &imap, &shared);
+		if (error) {
+			/* TODO: retry here */
+			xfs_trans_commit(tp);
+			xfs_iunlock(ip, lock_mode);
+			return error;
+		}
+		if (shared)
+			goto return_cow;
+
+		/*
+		 * HW accelerated atomic write is possible directly on the data
+		 * fork extent so lets remove the cow extent as we don't need it
+		 * anymore.
+		 */
+		/*
+		 * TODO: I'm still not 100% sure if we really need a txn to
+		 * cancel the COW blocks. Since atomic extents are special
+		 * in-memeory only COW blocks that dont really have entries in
+		 * the refcount btrees etc.
+		 */
+		xfs_trans_ijoin(tp, ip, 0);
+
+		error = xfs_reflink_cancel_cow_blocks(
+			ip, &tp, offset_fsb, end_fsb - offset_fsb, true);
+		if (error) {
+			/* TODO: retry possible */
+			xfs_trans_commit(tp);
+			xfs_iunlock(ip, lock_mode);
+			return error;
+		}
+
+		xfs_trans_commit(tp);
+		need_atomic_bio = true;
+		cow_fsb = NULLFILEOFF;
+		goto found_imap;
+
+return_cow:
+
+		if (tp)
+			xfs_trans_commit(tp);
+
 		XFS_WPC(wpc)->cow_seq = READ_ONCE(ip->i_cowfp->if_seq);
-		xfs_iunlock(ip, XFS_ILOCK_SHARED);
+		xfs_iunlock(ip, lock_mode);
 
 		whichfork = XFS_COW_FORK;
 		goto allocate_blocks;
@@ -401,11 +505,13 @@ retry:
 	 */
 	if (!xfs_iext_lookup_extent(ip, &ip->i_df, offset_fsb, &icur, &imap))
 		imap.br_startoff = end_fsb;	/* fake a hole past EOF */
+found_imap:
 	XFS_WPC(wpc)->data_seq = READ_ONCE(ip->i_df.if_seq);
-	xfs_iunlock(ip, XFS_ILOCK_SHARED);
+	xfs_iunlock(ip, lock_mode);
 
 	/* landed in a hole or beyond EOF? */
 	if (imap.br_startoff > offset_fsb) {
+		ASSERT(!need_atomic_bio);
 		imap.br_blockcount = imap.br_startoff - offset_fsb;
 		imap.br_startoff = offset_fsb;
 		imap.br_startblock = HOLESTARTBLOCK;
@@ -428,6 +534,8 @@ retry:
 		goto allocate_blocks;
 
 	xfs_bmbt_to_iomap(ip, &wpc->iomap, &imap, 0, 0, XFS_WPC(wpc)->data_seq);
+	if (need_atomic_bio)
+		xfs_iomap_mark_atomic(&wpc->iomap);
 	trace_xfs_map_blocks_found(ip, offset, count, whichfork, &imap);
 	return 0;
 allocate_blocks:
@@ -457,6 +565,9 @@ allocate_blocks:
 		ASSERT(error != -EAGAIN);
 		return error;
 	}
+
+	if (need_atomic_bio)
+		xfs_iomap_mark_atomic(&wpc->iomap);
 
 	/*
 	 * Due to merging the return real extent might be larger than the

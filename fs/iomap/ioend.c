@@ -107,6 +107,10 @@ static struct iomap_ioend *iomap_alloc_ioend(struct iomap_writepage_ctx *wpc,
 		loff_t pos, u16 ioend_flags)
 {
 	struct bio *bio;
+	blk_opf_t opf = REQ_OP_WRITE | wbc_to_write_flags(wpc->wbc);
+
+	if (wpc->iomap.flags & IOMAP_F_ATOMIC_BIO)
+		opf |= REQ_ATOMIC;
 
 	bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS,
 			       REQ_OP_WRITE | wbc_to_write_flags(wpc->wbc),
@@ -185,6 +189,8 @@ ssize_t iomap_add_to_ioend(struct iomap_writepage_ctx *wpc, struct folio *folio,
 		ioend_flags |= IOMAP_IOEND_UNWRITTEN;
 	if (wpc->iomap.flags & IOMAP_F_SHARED)
 		ioend_flags |= IOMAP_IOEND_SHARED;
+	if (wpc->iomap.flags | IOMAP_F_ATOMIC_BIO)
+		ioend_flags |= IOMAP_IOEND_NOMERGE;
 	if (folio_test_dropbehind(folio))
 		ioend_flags |= IOMAP_IOEND_DONTCACHE;
 	if (pos == wpc->iomap.offset && (wpc->iomap.flags & IOMAP_F_BOUNDARY))
