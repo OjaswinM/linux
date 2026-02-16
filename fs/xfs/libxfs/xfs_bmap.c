@@ -1455,10 +1455,14 @@ xfs_bmap_add_extent_delay_real(
 	xfs_filblks_t		temp=0;	/* value for da_new calculations */
 	int			tmp_rval;	/* partial logging flags */
 	struct xfs_bmbt_irec	old;
+	xfs_filblks_t		max_len = XFS_MAX_BMBT_EXTLEN;
+	bool			is_atomic = xfs_bmbt_is_atomic(new);
 
 	ASSERT(whichfork != XFS_ATTR_FORK);
 	ASSERT(!isnullstartblock(new->br_startblock));
 	ASSERT(!bma->cur || (bma->cur->bc_flags & XFS_BTREE_BMBT_WASDEL));
+	/* atomic extents should only exist in COW fork */
+	ASSERT((state & BMAP_COWFORK) || !is_atomic);
 
 	XFS_STATS_INC(mp, xs_add_exlist);
 
@@ -1470,10 +1474,28 @@ xfs_bmap_add_extent_delay_real(
 	 * Set up a bunch of variables to make the tests simpler.
 	 */
 	xfs_iext_get_extent(ifp, &bma->icur, &PREV);
+
+	if (xfs_bmbt_is_atomic(&PREV)) {
+		/*
+		 * If we are trying to convert an atomic extent it shall retain
+		 * its atomic status
+		 */
+		xfs_bmbt_set_atomic(new);
+		is_atomic = true;
+	}
+
 	new_endoff = new->br_startoff + new->br_blockcount;
 	ASSERT(isnullstartblock(PREV.br_startblock));
 	ASSERT(PREV.br_startoff <= new->br_startoff);
 	ASSERT(PREV.br_startoff + PREV.br_blockcount >= new_endoff);
+	ASSERT(new->br_flags == PREV.br_flags);
+
+	if (is_atomic)
+		max_len = min(
+			XFS_B_TO_FSB(bma->ip->i_mount,
+				     xfs_get_atomic_write_max(bma->ip, false)),
+			max_len);
+
 
 	da_old = startblockval(PREV.br_startblock);
 	da_new = 0;
@@ -1501,7 +1523,8 @@ xfs_bmap_add_extent_delay_real(
 	    LEFT.br_startoff + LEFT.br_blockcount == new->br_startoff &&
 	    LEFT.br_startblock + LEFT.br_blockcount == new->br_startblock &&
 	    LEFT.br_state == new->br_state &&
-	    LEFT.br_blockcount + new->br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    LEFT.br_flags == new->br_flags &&
+	    LEFT.br_blockcount + new->br_blockcount <= max_len &&
 	    xfs_bmap_same_rtgroup(bma->ip, whichfork, &LEFT, new))
 		state |= BMAP_LEFT_CONTIG;
 
@@ -1520,13 +1543,14 @@ xfs_bmap_add_extent_delay_real(
 	    new_endoff == RIGHT.br_startoff &&
 	    new->br_startblock + new->br_blockcount == RIGHT.br_startblock &&
 	    new->br_state == RIGHT.br_state &&
-	    new->br_blockcount + RIGHT.br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    new->br_flags == RIGHT.br_flags &&
+	    new->br_blockcount + RIGHT.br_blockcount <= max_len &&
 	    ((state & (BMAP_LEFT_CONTIG | BMAP_LEFT_FILLING |
 		       BMAP_RIGHT_FILLING)) !=
 		      (BMAP_LEFT_CONTIG | BMAP_LEFT_FILLING |
 		       BMAP_RIGHT_FILLING) ||
 	     LEFT.br_blockcount + new->br_blockcount + RIGHT.br_blockcount
-			<= XFS_MAX_BMBT_EXTLEN) &&
+			<= max_len) &&
 	    xfs_bmap_same_rtgroup(bma->ip, whichfork, new, &RIGHT))
 		state |= BMAP_RIGHT_CONTIG;
 
@@ -2025,6 +2049,8 @@ xfs_bmap_add_extent_unwritten_real(
 	uint32_t		state = xfs_bmap_fork_to_state(whichfork);
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_bmbt_irec	old;
+	xfs_filblks_t		max_len = XFS_MAX_BMBT_EXTLEN;
+	bool			is_atomic = xfs_bmbt_is_atomic(new);
 
 	*logflagsp = 0;
 
@@ -2032,6 +2058,8 @@ xfs_bmap_add_extent_unwritten_real(
 	ifp = xfs_ifork_ptr(ip, whichfork);
 
 	ASSERT(!isnullstartblock(new->br_startblock));
+	/* atomic extents should only exist in COW fork */
+	ASSERT((state & BMAP_COWFORK) || !is_atomic);
 
 	XFS_STATS_INC(mp, xs_add_exlist);
 
@@ -2044,10 +2072,26 @@ xfs_bmap_add_extent_unwritten_real(
 	 */
 	error = 0;
 	xfs_iext_get_extent(ifp, icur, &PREV);
+
+	if (xfs_bmbt_is_atomic(&PREV)) {
+		/*
+		 * If we are trying to convert an atomic extent it shall retain
+		 * its atomic status
+		 */
+		xfs_bmbt_set_atomic(new);
+		is_atomic = true;
+	}
+
 	ASSERT(new->br_state != PREV.br_state);
+	ASSERT(new->br_flags == PREV.br_flags);
 	new_endoff = new->br_startoff + new->br_blockcount;
 	ASSERT(PREV.br_startoff <= new->br_startoff);
 	ASSERT(PREV.br_startoff + PREV.br_blockcount >= new_endoff);
+
+	if (is_atomic)
+		max_len = min(XFS_B_TO_FSB(ip->i_mount,
+					   xfs_get_atomic_write_max(ip, false)),
+			      max_len);
 
 	/*
 	 * Set flags determining what part of the previous oldext allocation
@@ -2072,7 +2116,8 @@ xfs_bmap_add_extent_unwritten_real(
 	    LEFT.br_startoff + LEFT.br_blockcount == new->br_startoff &&
 	    LEFT.br_startblock + LEFT.br_blockcount == new->br_startblock &&
 	    LEFT.br_state == new->br_state &&
-	    LEFT.br_blockcount + new->br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    LEFT.br_flags == new->br_flags &&
+	    LEFT.br_blockcount + new->br_blockcount <= max_len &&
 	    xfs_bmap_same_rtgroup(ip, whichfork, &LEFT, new))
 		state |= BMAP_LEFT_CONTIG;
 
@@ -2091,13 +2136,14 @@ xfs_bmap_add_extent_unwritten_real(
 	    new_endoff == RIGHT.br_startoff &&
 	    new->br_startblock + new->br_blockcount == RIGHT.br_startblock &&
 	    new->br_state == RIGHT.br_state &&
-	    new->br_blockcount + RIGHT.br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    new->br_flags == RIGHT.br_flags &&
+	    new->br_blockcount + RIGHT.br_blockcount <= max_len &&
 	    ((state & (BMAP_LEFT_CONTIG | BMAP_LEFT_FILLING |
 		       BMAP_RIGHT_FILLING)) !=
 		      (BMAP_LEFT_CONTIG | BMAP_LEFT_FILLING |
 		       BMAP_RIGHT_FILLING) ||
 	     LEFT.br_blockcount + new->br_blockcount + RIGHT.br_blockcount
-			<= XFS_MAX_BMBT_EXTLEN) &&
+			<= max_len) &&
 	    xfs_bmap_same_rtgroup(ip, whichfork, new, &RIGHT))
 		state |= BMAP_RIGHT_CONTIG;
 
@@ -2585,9 +2631,18 @@ xfs_bmap_add_extent_hole_real(
 	int			rval=0;	/* return value (logging flags) */
 	uint32_t		state = xfs_bmap_fork_to_state(whichfork);
 	struct xfs_bmbt_irec	old;
+	xfs_filblks_t		max_len = XFS_MAX_BMBT_EXTLEN;
+	bool			is_atomic = xfs_bmbt_is_atomic(new);
 
 	ASSERT(!isnullstartblock(new->br_startblock));
 	ASSERT(!cur || !(cur->bc_flags & XFS_BTREE_BMBT_WASDEL));
+	/* atomic extents should only exist in COW fork */
+	ASSERT((state & BMAP_COWFORK) || !is_atomic);
+
+	if (is_atomic)
+		max_len = min(XFS_B_TO_FSB(ip->i_mount,
+					   xfs_get_atomic_write_max(ip, false)),
+			      max_len);
 
 	XFS_STATS_INC(mp, xs_add_exlist);
 
@@ -2618,7 +2673,8 @@ xfs_bmap_add_extent_hole_real(
 	    left.br_startoff + left.br_blockcount == new->br_startoff &&
 	    left.br_startblock + left.br_blockcount == new->br_startblock &&
 	    left.br_state == new->br_state &&
-	    left.br_blockcount + new->br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    left.br_flags == new->br_flags &&
+	    left.br_blockcount + new->br_blockcount <= max_len &&
 	    xfs_bmap_same_rtgroup(ip, whichfork, &left, new))
 		state |= BMAP_LEFT_CONTIG;
 
@@ -2626,10 +2682,11 @@ xfs_bmap_add_extent_hole_real(
 	    new->br_startoff + new->br_blockcount == right.br_startoff &&
 	    new->br_startblock + new->br_blockcount == right.br_startblock &&
 	    new->br_state == right.br_state &&
-	    new->br_blockcount + right.br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    new->br_flags == right.br_flags &&
+	    new->br_blockcount + right.br_blockcount <= max_len &&
 	    (!(state & BMAP_LEFT_CONTIG) ||
 	     left.br_blockcount + new->br_blockcount +
-	     right.br_blockcount <= XFS_MAX_BMBT_EXTLEN) &&
+	     right.br_blockcount <= max_len) &&
 	    xfs_bmap_same_rtgroup(ip, whichfork, new, &right))
 		state |= BMAP_RIGHT_CONTIG;
 
@@ -4771,6 +4828,7 @@ xfs_bmap_del_extent_delay(
 
 		new.br_startoff = del_endoff;
 		new.br_state = got->br_state;
+		new.br_flags = got->br_flags;
 		new.br_startblock = nullstartblock((int)new_indlen);
 
 		xfs_iext_update_extent(ip, state, icur, got);
@@ -4863,6 +4921,7 @@ xfs_bmap_del_extent_cow(
 		new.br_startoff = del_endoff;
 		new.br_blockcount = got_endoff - del_endoff;
 		new.br_state = got->br_state;
+		new.br_flags = got->br_flags;
 		new.br_startblock = del->br_startblock + del->br_blockcount;
 
 		xfs_iext_update_extent(ip, state, icur, got);
@@ -5047,6 +5106,7 @@ xfs_bmap_del_extent_real(
 		new.br_startoff = del_endoff;
 		new.br_blockcount = got_endoff - del_endoff;
 		new.br_state = got.br_state;
+		new.br_flags = got.br_flags;
 		new.br_startblock = del_endblock;
 
 		*logflagsp |= XFS_ILOG_CORE;

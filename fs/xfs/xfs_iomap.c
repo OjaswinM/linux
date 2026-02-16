@@ -1317,9 +1317,18 @@ xfs_bmap_add_extent_hole_delay(
 	xfs_bmbt_irec_t		right;	/* right neighbor extent entry */
 	uint32_t		state = xfs_bmap_fork_to_state(whichfork);
 	xfs_filblks_t		temp;	 /* temp for indirect calculations */
+	xfs_filblks_t		max_len = XFS_MAX_BMBT_EXTLEN;
+	bool			is_atomic = xfs_bmbt_is_atomic(new);
 
 	ifp = xfs_ifork_ptr(ip, whichfork);
 	ASSERT(isnullstartblock(new->br_startblock));
+	/* atomic extents should only exist in COW fork */
+	ASSERT((state & BMAP_COWFORK) || !is_atomic);
+
+	if (is_atomic)
+		max_len = min(XFS_B_TO_FSB(ip->i_mount,
+					   xfs_get_atomic_write_max(ip, false)),
+			      max_len);
 
 	/*
 	 * Check and set flags if this segment has a left neighbor
@@ -1346,15 +1355,17 @@ xfs_bmap_add_extent_hole_delay(
 	 */
 	if ((state & BMAP_LEFT_VALID) && (state & BMAP_LEFT_DELAY) &&
 	    left.br_startoff + left.br_blockcount == new->br_startoff &&
-	    left.br_blockcount + new->br_blockcount <= XFS_MAX_BMBT_EXTLEN)
+	    left.br_flags == new->br_flags &&
+	    left.br_blockcount + new->br_blockcount <= max_len)
 		state |= BMAP_LEFT_CONTIG;
 
 	if ((state & BMAP_RIGHT_VALID) && (state & BMAP_RIGHT_DELAY) &&
 	    new->br_startoff + new->br_blockcount == right.br_startoff &&
-	    new->br_blockcount + right.br_blockcount <= XFS_MAX_BMBT_EXTLEN &&
+	    new->br_flags == right.br_flags &&
+	    new->br_blockcount + right.br_blockcount <= max_len &&
 	    (!(state & BMAP_LEFT_CONTIG) ||
 	     (left.br_blockcount + new->br_blockcount +
-	      right.br_blockcount <= XFS_MAX_BMBT_EXTLEN)))
+	      right.br_blockcount <= max_len)))
 		state |= BMAP_RIGHT_CONTIG;
 
 	/*

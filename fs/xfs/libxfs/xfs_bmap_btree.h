@@ -57,6 +57,9 @@ void xfs_bmbt_destroy_cur_cache(void);
 
 void xfs_bmbt_init_block(struct xfs_inode *ip, struct xfs_btree_block *buf,
 		struct xfs_buf *bp, __u16 level, __u16 numrecs);
+void xfs_bmbt_set_atomic(struct xfs_bmbt_irec *irec);
+void xfs_bmbt_clear_atomic(struct xfs_bmbt_irec *irec);
+bool xfs_bmbt_is_atomic(struct xfs_bmbt_irec *irec);
 
 /*
  * Btree block header size depends on a superblock flag.

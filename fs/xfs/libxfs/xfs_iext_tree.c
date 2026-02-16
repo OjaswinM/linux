@@ -32,6 +32,7 @@
 struct xfs_iext_rec {
 	uint64_t			lo;
 	uint64_t			hi;
+	bool				is_atomic;
 };
 
 /*
@@ -66,6 +67,11 @@ xfs_iext_set(
 
 	if (irec->br_state == XFS_EXT_UNWRITTEN)
 		rec->hi |= (1 << 21);
+
+	if (irec->br_flags & XFS_BMBT_FLAG_ATOMIC)
+		rec->is_atomic = true;
+	else
+		rec->is_atomic = false;
 }
 
 static void
@@ -83,6 +89,10 @@ xfs_iext_get(
 		irec->br_state = XFS_EXT_UNWRITTEN;
 	else
 		irec->br_state = XFS_EXT_NORM;
+
+	irec->br_flags = 0;
+	if (rec->is_atomic)
+		irec->br_flags |= XFS_BMBT_FLAG_ATOMIC;
 }
 
 enum {

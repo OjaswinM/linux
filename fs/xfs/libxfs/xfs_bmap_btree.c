@@ -858,3 +858,21 @@ xfs_bmbt_destroy_cur_cache(void)
 	kmem_cache_destroy(xfs_bmbt_cur_cache);
 	xfs_bmbt_cur_cache = NULL;
 }
+
+void
+xfs_bmbt_set_atomic(struct xfs_bmbt_irec *irec)
+{
+	irec->br_flags |= XFS_BMBT_FLAG_ATOMIC;
+}
+
+void
+xfs_bmbt_clear_atomic(struct xfs_bmbt_irec *irec)
+{
+	irec->br_flags &= (u32)~XFS_BMBT_FLAG_ATOMIC;
+}
+
+bool
+xfs_bmbt_is_atomic(struct xfs_bmbt_irec *irec)
+{
+	return (irec->br_flags & XFS_BMBT_FLAG_ATOMIC);
+}
