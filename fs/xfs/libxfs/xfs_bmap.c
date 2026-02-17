@@ -2639,10 +2639,12 @@ xfs_bmap_add_extent_hole_real(
 	/* atomic extents should only exist in COW fork */
 	ASSERT((state & BMAP_COWFORK) || !is_atomic);
 
-	if (is_atomic)
+	if (is_atomic) {
 		max_len = min(XFS_B_TO_FSB(ip->i_mount,
 					   xfs_get_atomic_write_max(ip, false)),
 			      max_len);
+		ip->i_atomic_blks += new->br_blockcount;
+	}
 
 	XFS_STATS_INC(mp, xs_add_exlist);
 
@@ -4754,6 +4756,9 @@ xfs_bmap_del_extent_delay(
 	xfs_quota_unreserve_blkres(ip, del->br_blockcount);
 	ip->i_delayed_blks -= del->br_blockcount;
 
+	if (xfs_bmbt_is_atomic(got))
+		ip->i_atomic_blks -= got->br_blockcount;
+
 	if (got->br_startoff == del->br_startoff)
 		state |= BMAP_LEFT_FILLING;
 	if (got_endoff == del_endoff)
@@ -4930,6 +4935,8 @@ xfs_bmap_del_extent_cow(
 		break;
 	}
 	ip->i_delayed_blks -= del->br_blockcount;
+	if (xfs_bmbt_is_atomic(got))
+		ip->i_atomic_blks -= got->br_blockcount;
 }
 
 static int
@@ -5212,6 +5219,8 @@ xfs_bmap_del_extent_real(
 	 */
 	if (nblks)
 		ip->i_nblocks -= nblks;
+	if (xfs_bmbt_is_atomic(&got))
+		ip->i_atomic_blks -= nblks;
 	/*
 	 * Adjust quota data.
 	 */

@@ -1325,10 +1325,12 @@ xfs_bmap_add_extent_hole_delay(
 	/* atomic extents should only exist in COW fork */
 	ASSERT((state & BMAP_COWFORK) || !is_atomic);
 
-	if (is_atomic)
+	if (is_atomic) {
 		max_len = min(XFS_B_TO_FSB(ip->i_mount,
 					   xfs_get_atomic_write_max(ip, false)),
 			      max_len);
+		ip->i_atomic_blks += new->br_blockcount;
+	}
 
 	/*
 	 * Check and set flags if this segment has a left neighbor

@@ -55,6 +55,7 @@ typedef struct xfs_inode {
 	/* Miscellaneous state. */
 	unsigned long		i_flags;	/* see defined flags below */
 	uint64_t		i_delayed_blks;	/* count of delay alloc blks */
+	uint64_t		i_atomic_blks;	/* count of atomic blks */
 	xfs_fsize_t		i_disk_size;	/* number of bytes in file */
 	xfs_rfsblock_t		i_nblocks;	/* # of direct & btree blocks */
 	prid_t			i_projid;	/* owner's project id */
@@ -313,7 +314,8 @@ bool xfs_is_always_cow_inode(const struct xfs_inode *ip);
 
 static inline bool xfs_is_cow_inode(const struct xfs_inode *ip)
 {
-	return xfs_is_reflink_inode(ip) || xfs_is_always_cow_inode(ip);
+	return xfs_is_reflink_inode(ip) || xfs_is_always_cow_inode(ip) ||
+	       ip->i_atomic_blks;
 }
 
 static inline bool xfs_inode_has_filedata(const struct xfs_inode *ip)

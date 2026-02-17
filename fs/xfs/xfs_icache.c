@@ -28,6 +28,8 @@
 #include "xfs_da_format.h"
 #include "xfs_dir2.h"
 #include "xfs_metafile.h"
+#include "xfs_types.h"
+#include "xfs_bmap_btree.h"
 
 #include <linux/iversion.h>
 
@@ -1889,8 +1891,29 @@ xfs_check_delalloc(
 		}
 	} while (xfs_iext_next_extent(ifp, &icur, &got));
 }
+
+static void
+xfs_check_atomic(
+	struct xfs_inode	*ip)
+{
+	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_COW_FORK);
+	struct xfs_bmbt_irec	got;
+	struct xfs_iext_cursor	icur;
+
+	if (!ifp || !xfs_iext_lookup_extent(ip, ifp, 0, &icur, &got))
+		return;
+	do {
+		if (xfs_bmbt_is_atomic(&got)) {
+			xfs_warn(ip->i_mount,
+	"ino %llx COW fork has atomic extent at [0x%llx:0x%llx]",
+				ip->i_ino,
+				got.br_startoff, got.br_blockcount);
+		}
+	} while (xfs_iext_next_extent(ifp, &icur, &got));
+}
 #else
 #define xfs_check_delalloc(ip, whichfork)	do { } while (0)
+#define xfs_check_atomic(ip)			do { } while (0)
 #endif
 
 /* Schedule the inode for reclaim. */
@@ -1901,9 +1924,10 @@ xfs_inodegc_set_reclaimable(
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_perag	*pag;
 
-	if (!xfs_is_shutdown(mp) && ip->i_delayed_blks) {
+	if (!xfs_is_shutdown(mp) && (ip->i_delayed_blks || ip->i_atomic_blks)) {
 		xfs_check_delalloc(ip, XFS_DATA_FORK);
 		xfs_check_delalloc(ip, XFS_COW_FORK);
+		xfs_check_atomic(ip);
 		ASSERT(0);
 	}
 
