@@ -125,8 +125,8 @@ static bool iomap_can_add_to_ioend(struct iomap_writepage_ctx *wpc, loff_t pos,
 
 	if (ioend_flags & IOMAP_IOEND_BOUNDARY)
 		return false;
-	if ((ioend_flags & IOMAP_IOEND_NOMERGE_FLAGS) !=
-	    (ioend->io_flags & IOMAP_IOEND_NOMERGE_FLAGS))
+	if ((ioend_flags & IOMAP_IOEND_MERGESAME_FLAGS) !=
+	    (ioend->io_flags & IOMAP_IOEND_MERGESAME_FLAGS))
 		return false;
 	if (pos != ioend->io_offset + ioend->io_size)
 		return false;
@@ -309,8 +309,8 @@ static bool iomap_ioend_can_merge(struct iomap_ioend *ioend,
 		return false;
 	if (next->io_flags & IOMAP_IOEND_BOUNDARY)
 		return false;
-	if ((ioend->io_flags & IOMAP_IOEND_NOMERGE_FLAGS) !=
-	    (next->io_flags & IOMAP_IOEND_NOMERGE_FLAGS))
+	if ((ioend->io_flags & IOMAP_IOEND_MERGESAME_FLAGS) !=
+	    (next->io_flags & IOMAP_IOEND_MERGESAME_FLAGS))
 		return false;
 	if (ioend->io_offset + ioend->io_size != next->io_offset)
 		return false;

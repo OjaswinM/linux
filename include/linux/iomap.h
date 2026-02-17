@@ -399,7 +399,7 @@ sector_t iomap_bmap(struct address_space *mapping, sector_t bno,
  * Flags that if set on either ioend prevent the merge of two ioends.
  * (IOMAP_IOEND_BOUNDARY also prevents merges, but only one-way)
  */
-#define IOMAP_IOEND_NOMERGE_FLAGS \
+#define IOMAP_IOEND_MERGESAME_FLAGS \
 	(IOMAP_IOEND_SHARED | IOMAP_IOEND_UNWRITTEN | IOMAP_IOEND_DIRECT | \
 	 IOMAP_IOEND_DONTCACHE)
 
