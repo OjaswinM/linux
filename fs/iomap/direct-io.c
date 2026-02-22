@@ -199,6 +199,20 @@ static void iomap_dio_done(struct iomap_dio *dio)
 	iomap_dio_complete_work(&dio->aio.work);
 }
 
+static void iomap_end_writethrough(struct bio *bio)
+{
+	struct folio_iter fi;
+	int i = 0;
+
+	/* walk all folios in bio, ending writeback on them */
+	bio_for_each_folio_all(fi, bio) {
+		i++;
+		folio_end_writeback(fi.folio);
+	}
+
+	WARN_ON(i > 1);
+}
+
 static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 {
 	struct iomap_dio *dio = bio->bi_private;
@@ -206,6 +220,14 @@ static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 	if (dio->flags & IOMAP_DIO_BOUNCE) {
 		bio_iov_iter_unbounce(bio, !!dio->error,
 				dio->flags & IOMAP_DIO_USER_BACKED);
+		bio_put(bio);
+	} else if (dio->flags & IOMAP_DIO_BUF_WRITETHROUGH){
+		/*
+		 * For buffered writethrough needing stable writes we can ensure
+		 * stable writes by waiting on folios writeback bit hence we
+		 * should never need a bounce buffer.
+		 */
+		iomap_end_writethrough(bio);
 		bio_put(bio);
 	} else if (dio->flags & IOMAP_DIO_USER_BACKED) {
 		bio_check_pages_dirty(bio);
@@ -578,7 +600,7 @@ static int iomap_dio_inline_iter(struct iomap_iter *iomi, struct iomap_dio *dio)
 	return iomap_iter_advance(iomi, copied);
 }
 
-int iomap_writethrough_iter(struct iomap_iter *iter, struct iomap_dio *dio)
+int iomap_dio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 {
 	switch (iter->iomap.type) {
 	case IOMAP_HOLE:
@@ -663,7 +685,8 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	dio->i_size = i_size_read(inode);
 	dio->dops = dops;
 	dio->error = 0;
-	dio->flags = dio_flags & (IOMAP_DIO_FSBLOCK_ALIGNED | IOMAP_DIO_BOUNCE);
+	dio->flags = dio_flags & (IOMAP_DIO_FSBLOCK_ALIGNED | IOMAP_DIO_BOUNCE |
+				  IOMAP_DIO_BUF_WRITETHROUGH);
 	dio->done_before = done_before;
 
 	dio->submit.iter = iter;
@@ -756,7 +779,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 	blk_start_plug(&plug);
 	while ((ret = iomap_iter(&iomi, ops)) > 0) {
-		iomi.status = iomap_writethrough_iter(&iomi, dio);
+		iomi.status = iomap_dio_iter(&iomi, dio);
 
 		/*
 		 * We can only poll for single bio I/Os.

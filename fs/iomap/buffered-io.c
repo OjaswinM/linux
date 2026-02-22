@@ -1086,6 +1086,183 @@ static bool iomap_write_end(struct iomap_iter *iter, size_t len, size_t copied,
 	return __iomap_write_end(iter->inode, pos, len, copied, folio);
 }
 
+static int iomap_writethrough_iter(struct kiocb *iocb, struct iomap_iter *iter,
+				   struct iov_iter *i,
+				   const struct iomap_write_ops *write_ops,
+				   const struct iomap_ops *ops,
+				   const struct iomap_dio_ops *dio_ops)
+{
+	ssize_t total_written = 0;
+	int status = 0;
+	struct address_space *mapping = iter->inode->i_mapping;
+	size_t chunk = mapping_max_folio_size(mapping);
+	unsigned int bdp_flags = (iter->flags & IOMAP_NOWAIT) ? BDP_ASYNC : 0;
+
+	do {
+		struct folio *folio;
+		loff_t old_size;
+		size_t offset;		/* Offset into folio */
+		u64 bytes;		/* Bytes to write to folio */
+		size_t copied;		/* Bytes copied from user */
+		u64 written;		/* Bytes have been written */
+		loff_t pos;
+
+		bytes = iov_iter_count(i);
+retry:
+		offset = iter->pos & (chunk - 1);
+		bytes = min(chunk - offset, bytes);
+		status = balance_dirty_pages_ratelimited_flags(mapping,
+							       bdp_flags);
+		if (unlikely(status))
+			break;
+
+		if (bytes > iomap_length(iter))
+			bytes = iomap_length(iter);
+
+		/*
+		 * Bring in the user page that we'll copy from _first_.
+		 * Otherwise there's a nasty deadlock on copying from the
+		 * same page as we're writing to, without it being marked
+		 * up-to-date.
+		 *
+		 * For async buffered writes the assumption is that the user
+		 * page has already been faulted in. This can be optimized by
+		 * faulting the user page.
+		 */
+		if (unlikely(fault_in_iov_iter_readable(i, bytes) == bytes)) {
+			status = -EFAULT;
+			break;
+		}
+
+		status = iomap_write_begin(iter, write_ops, &folio, &offset,
+				&bytes);
+		if (unlikely(status)) {
+			iomap_write_failed(iter->inode, iter->pos, bytes);
+			break;
+		}
+		if (iter->iomap.flags & IOMAP_F_STALE)
+			break;
+
+		pos = iter->pos;
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_folio(folio);
+
+		copied = copy_folio_from_iter_atomic(folio, offset, bytes, i);
+		written = iomap_write_end(iter, bytes, copied, folio) ?
+			  copied : 0;
+
+		/*
+		 * Update the in-memory inode size after copying the data into
+		 * the page cache.  It's up to the file system to write the
+		 * updated size to disk, preferably after I/O completion so that
+		 * no stale data is exposed.  Only once that's done can we
+		 * unlock and release the folio.
+		 */
+		old_size = iter->inode->i_size;
+		if (pos + written > old_size) {
+			i_size_write(iter->inode, pos + written);
+			iter->iomap.flags |= IOMAP_F_SIZE_CHANGED;
+		}
+
+		/*
+		 * TODO: This happens before pagecache_isize_extent function
+		 * below. This might cause an issue where we don't zero out the
+		 * EOF block in the folio, before sending the IO. But we can't
+		 * keep if after that since that is after unlock and it locks
+		 * the folio in the function again.
+		 *
+		 * Deal later
+		 */
+		if (written && iter->flags & IOMAP_WRITETHROUGH) {
+			/*
+			 * Use the dio machinery to send a writethrough IO
+			 */
+			struct bio_vec array[1];
+			struct iov_iter i_pagecache;
+			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
+
+			/*
+			 * dio = kmalloc(sizeof(*dio), GFP_KERNEL);
+			 * if (!dio)
+			 * 	return -ENOMEM;
+			 * dio->iocb = iocb;
+			 * atomic_set(&dio->ref, 1);
+			 * dio->size = 0;
+			 * dio->i_size = i_size_read(iter->inode);
+			 * dio->dops = NULL;
+			 * dio->error = 0;
+			 * dio->flags = 0;
+			 * dio->done_before = 0;
+			 */
+
+			/*
+			 * TODO: Iterate over pages under write
+			 */
+			bvec_set_page(&array[0],
+				      folio_page(folio, folio->index),
+				      PAGE_SIZE, 0);
+			iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
+				      PAGE_SIZE);
+
+			/*
+			 * dio->submit.iter = &i_pagecache;
+			 * dio->submit.waiter = current;
+			 */
+
+			if (unlikely(!folio_prepare_writeback(
+				    mapping, WB_SYNC_NONE, folio))) {
+				WARN_ON(true);
+				/* Make written 0 so we go to error handling path */
+				written = 0;
+				goto put_folio;
+			}
+
+			iomap_dio_rw(iocb, &i_pagecache, ops, dio_ops, dio_flags, NULL, 0);
+
+			/*
+			 * TODO: We can exit and release folio lock after a
+			 * write and IO might still be pending ie we've not
+			 * cleared writeback flag. This can have issue like
+			 * folio might get modified etc before IO. I think this
+			 * will need stable writes
+			 */
+
+		}
+
+put_folio:
+		__iomap_put_folio(iter, write_ops, written, folio);
+
+		if (old_size < pos)
+			pagecache_isize_extended(iter->inode, old_size, pos);
+
+
+		cond_resched();
+		if (unlikely(written == 0)) {
+			/*
+			 * A short copy made iomap_write_end() reject the
+			 * thing entirely.  Might be memory poisoning
+			 * halfway through, might be a race with munmap,
+			 * might be severe memory pressure.
+			 */
+			iomap_write_failed(iter->inode, pos, bytes);
+			iov_iter_revert(i, copied);
+
+			if (chunk > PAGE_SIZE)
+				chunk /= 2;
+			if (copied) {
+				bytes = copied;
+				goto retry;
+			}
+		} else {
+			total_written += written;
+			iomap_iter_advance(iter, written);
+		}
+	} while (iov_iter_count(i) && iomap_length(iter));
+
+	return total_written ? 0 : status;
+}
+
 static int iomap_write_iter(struct kiocb *iocb, struct iomap_iter *iter,
 			    struct iov_iter *i,
 			    const struct iomap_write_ops *write_ops,

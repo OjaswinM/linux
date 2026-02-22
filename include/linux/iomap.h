@@ -286,7 +286,7 @@ struct iomap_iter {
 
 int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops);
 int iomap_iter_advance(struct iomap_iter *iter, u64 count);
-int iomap_writethrough_iter(struct iomap_iter *iter, struct iomap_dio *dio);
+int iomap_dio_iter(struct iomap_iter *iter, struct iomap_dio *dio);
 
 /**
  * iomap_length_trim - trimmed length of the current iomap iteration
@@ -626,6 +626,14 @@ struct iomap_dio_ops {
  * completions to user context for reads when this is set.
  */
 #define IOMAP_DIO_BOUNCE		(1 << 4)
+
+/*
+ * Set when we are using the dio path to perform writethrough for
+ * RWF_WRITETHROUGH buffered write. The ->endio handler must check this
+ * to perform any writethrough related cleanup like ending writeback on
+ * a folio.
+ */
+#define IOMAP_DIO_BUF_WRITETHROUGH	(1 << 5)
 
 ssize_t iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		const struct iomap_ops *ops, const struct iomap_dio_ops *dops,
