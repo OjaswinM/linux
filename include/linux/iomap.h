@@ -250,12 +250,6 @@ struct iomap_ops {
 			ssize_t written, unsigned flags, struct iomap *iomap);
 };
 
-/*
- * struct iomap_writethrough_args {
- * 	struct iomap_writepage_ctx *wpc;
- * };
- */
-
 /**
  * struct iomap_iter - Iterate through a range of a file
  * @inode: Set at the start of the iteration and should not change.
@@ -378,11 +372,6 @@ static inline bool iomap_want_unshare_iter(const struct iomap_iter *iter)
 ssize_t iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *from,
 		const struct iomap_ops *ops,
 		const struct iomap_write_ops *write_ops, void *private);
-ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
-				      const struct iomap_ops *ops,
-				      const struct iomap_write_ops *write_ops,
-				      struct iomap_writepage_ctx *wpc,
-				      void *private);
 void iomap_read_folio(const struct iomap_ops *ops,
 		struct iomap_read_folio_ctx *ctx, void *private);
 void iomap_readahead(const struct iomap_ops *ops,
@@ -643,6 +632,20 @@ struct iomap_dio *__iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		unsigned int dio_flags, void *private, size_t done_before);
 ssize_t iomap_dio_complete(struct iomap_dio *dio);
 void iomap_dio_bio_end_io(struct bio *bio);
+
+/*
+ * In writethrough, we copy user data to folio first and then send the folio
+ * to writeback via dio path. To achieve this, we need callbacks from iomap_ops,
+ * iomap_write_ops and iomap_dio_ops. This struct packs them together.
+ */
+struct iomap_writethrough_ops {
+	const struct iomap_ops *ops;
+	const struct iomap_write_ops *write_ops;
+	const struct iomap_dio_ops *dio_ops;
+};
+ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
+				      const struct iomap_writethrough_ops *wt_ops,
+				      void *private);
 
 #ifdef CONFIG_SWAP
 struct file;

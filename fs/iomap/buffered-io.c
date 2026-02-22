@@ -1088,9 +1088,7 @@ static bool iomap_write_end(struct iomap_iter *iter, size_t len, size_t copied,
 
 static int iomap_writethrough_iter(struct kiocb *iocb, struct iomap_iter *iter,
 				   struct iov_iter *i,
-				   const struct iomap_write_ops *write_ops,
-				   const struct iomap_ops *ops,
-				   const struct iomap_dio_ops *dio_ops)
+				   const struct iomap_writethrough_ops *wt_ops)
 {
 	ssize_t total_written = 0;
 	int status = 0;
@@ -1134,7 +1132,7 @@ retry:
 			break;
 		}
 
-		status = iomap_write_begin(iter, write_ops, &folio, &offset,
+		status = iomap_write_begin(iter, wt_ops->write_ops, &folio, &offset,
 				&bytes);
 		if (unlikely(status)) {
 			iomap_write_failed(iter->inode, iter->pos, bytes);
@@ -1182,33 +1180,16 @@ retry:
 			struct iov_iter i_pagecache;
 			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
 
-			/*
-			 * dio = kmalloc(sizeof(*dio), GFP_KERNEL);
-			 * if (!dio)
-			 * 	return -ENOMEM;
-			 * dio->iocb = iocb;
-			 * atomic_set(&dio->ref, 1);
-			 * dio->size = 0;
-			 * dio->i_size = i_size_read(iter->inode);
-			 * dio->dops = NULL;
-			 * dio->error = 0;
-			 * dio->flags = 0;
-			 * dio->done_before = 0;
-			 */
 
 			/*
-			 * TODO: Iterate over pages under write
+			 * TODO: Iterate over pages under write instead of
+			 * single page
 			 */
 			bvec_set_page(&array[0],
 				      folio_page(folio, folio->index),
 				      PAGE_SIZE, 0);
 			iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
 				      PAGE_SIZE);
-
-			/*
-			 * dio->submit.iter = &i_pagecache;
-			 * dio->submit.waiter = current;
-			 */
 
 			if (unlikely(!folio_prepare_writeback(
 				    mapping, WB_SYNC_NONE, folio))) {
@@ -1218,7 +1199,8 @@ retry:
 				goto put_folio;
 			}
 
-			iomap_dio_rw(iocb, &i_pagecache, ops, dio_ops, dio_flags, NULL, 0);
+			iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
+				     wt_ops->dio_ops, dio_flags, NULL, 0);
 
 			/*
 			 * TODO: We can exit and release folio lock after a
@@ -1231,7 +1213,7 @@ retry:
 		}
 
 put_folio:
-		__iomap_put_folio(iter, write_ops, written, folio);
+		__iomap_put_folio(iter, wt_ops->write_ops, written, folio);
 
 		if (old_size < pos)
 			pagecache_isize_extended(iter->inode, old_size, pos);
@@ -1489,9 +1471,7 @@ iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *i,
 EXPORT_SYMBOL_GPL(iomap_file_buffered_write);
 
 ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
-				      const struct iomap_ops *ops,
-				      const struct iomap_write_ops *write_ops,
-				      struct iomap_writepage_ctx *wpc,
+				      const struct iomap_writethrough_ops *wt_ops,
 				      void *private)
 {
 	struct iomap_iter iter = {
@@ -1510,8 +1490,8 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 	if (iocb->ki_flags & IOCB_WRITETHROUGH)
 		iter.flags |= IOMAP_WRITETHROUGH;
 
-	while ((ret = iomap_iter(&iter, ops)) > 0)
-		iter.status = iomap_write_iter(iocb, &iter, i, write_ops, wpc);
+	while ((ret = iomap_iter(&iter, wt_ops->ops)) > 0)
+		iter.status = iomap_writethrough_iter(iocb, &iter, i, wt_ops);
 
 	if (unlikely(iter.pos == iocb->ki_pos))
 		return ret;

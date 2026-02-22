@@ -989,6 +989,13 @@ out:
 	return ret;
 }
 
+const struct iomap_writethrough_ops xfs_writethrough_ops = {
+	.ops			= &xfs_direct_write_iomap_ops,
+	.write_ops		= &xfs_iomap_write_ops,
+	.dio_ops		= &xfs_dio_write_ops,
+};
+
+
 STATIC ssize_t
 xfs_file_buffered_write(
 	struct kiocb		*iocb,
@@ -1012,19 +1019,8 @@ write_retry:
 
 	trace_xfs_file_buffered_write(iocb, from);
 	if (iocb->ki_flags & IOCB_WRITETHROUGH) {
-		struct xfs_writepage_ctx	wpc = {
-			.ctx = {
-				.inode	= inode,
-				.wbc	= NULL,
-				.ops	= &xfs_writeback_ops,
-				.type	= IOMAP_WRITEPAGE_WRITETHROUGH,
-			},
-		};
-
 		ret = iomap_file_writethrough_write(iocb, from,
-						    &xfs_direct_write_iomap_ops,
-						    &xfs_iomap_write_ops,
-						    &wpc.ctx, NULL);
+						    &xfs_writethrough_ops, NULL);
 	} else
 		ret = iomap_file_buffered_write(iocb, from,
 						&xfs_buffered_write_iomap_ops,
