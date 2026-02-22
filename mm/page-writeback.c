@@ -2358,8 +2358,8 @@ void tag_pages_for_writeback(struct address_space *mapping,
 }
 EXPORT_SYMBOL(tag_pages_for_writeback);
 
-static bool folio_prepare_writeback(struct address_space *mapping,
-		struct writeback_control *wbc, struct folio *folio)
+bool folio_prepare_writeback(struct address_space *mapping,
+		 enum writeback_sync_modes sync_mode, struct folio *folio)
 {
 	/*
 	 * Folio truncated or invalidated. We can freely skip it then,
@@ -2378,7 +2378,7 @@ static bool folio_prepare_writeback(struct address_space *mapping,
 		return false;
 
 	if (folio_test_writeback(folio)) {
-		if (wbc->sync_mode == WB_SYNC_NONE)
+		if (sync_mode == WB_SYNC_NONE)
 			return false;
 		folio_wait_writeback(folio);
 	}
@@ -2416,7 +2416,7 @@ retry:
 	}
 
 	folio_lock(folio);
-	if (unlikely(!folio_prepare_writeback(mapping, wbc, folio))) {
+	if (unlikely(!folio_prepare_writeback(mapping, wbc->sync_mode, folio))) {
 		folio_unlock(folio);
 		goto retry;
 	}
