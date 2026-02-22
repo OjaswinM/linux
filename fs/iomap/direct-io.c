@@ -18,37 +18,13 @@
  * Private flags for iomap_dio, must not overlap with the public ones in
  * iomap.h:
  */
+#define IOMAP_BUF_WRITETHROUGH	(1U << 25)
 #define IOMAP_DIO_NO_INVALIDATE	(1U << 26)
 #define IOMAP_DIO_COMP_WORK	(1U << 27)
 #define IOMAP_DIO_WRITE_THROUGH	(1U << 28)
 #define IOMAP_DIO_NEED_SYNC	(1U << 29)
 #define IOMAP_DIO_WRITE		(1U << 30)
 #define IOMAP_DIO_USER_BACKED	(1U << 31)
-
-struct iomap_dio {
-	struct kiocb		*iocb;
-	const struct iomap_dio_ops *dops;
-	loff_t			i_size;
-	loff_t			size;
-	atomic_t		ref;
-	unsigned		flags;
-	int			error;
-	size_t			done_before;
-	bool			wait_for_completion;
-
-	union {
-		/* used during submission and for synchronous completion: */
-		struct {
-			struct iov_iter		*iter;
-			struct task_struct	*waiter;
-		} submit;
-
-		/* used for aio completion: */
-		struct {
-			struct work_struct	work;
-		} aio;
-	};
-};
 
 static struct bio *iomap_dio_alloc_bio(const struct iomap_iter *iter,
 		struct iomap_dio *dio, unsigned short nr_vecs, blk_opf_t opf)
@@ -602,7 +578,7 @@ static int iomap_dio_inline_iter(struct iomap_iter *iomi, struct iomap_dio *dio)
 	return iomap_iter_advance(iomi, copied);
 }
 
-static int iomap_dio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
+int iomap_writethrough_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 {
 	switch (iter->iomap.type) {
 	case IOMAP_HOLE:
@@ -780,7 +756,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 	blk_start_plug(&plug);
 	while ((ret = iomap_iter(&iomi, ops)) > 0) {
-		iomi.status = iomap_dio_iter(&iomi, dio);
+		iomi.status = iomap_writethrough_iter(&iomi, dio);
 
 		/*
 		 * We can only poll for single bio I/Os.

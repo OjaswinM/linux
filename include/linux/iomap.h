@@ -120,6 +120,32 @@ struct iomap {
 	u64			validity_cookie; /* used with .iomap_valid() */
 };
 
+struct iomap_dio {
+	struct kiocb		*iocb;
+	const struct iomap_dio_ops *dops;
+	loff_t			i_size;
+	loff_t			size;
+	atomic_t		ref;
+	unsigned		flags;
+	int			error;
+	size_t			done_before;
+	bool			wait_for_completion;
+
+	union {
+		/* used during submission and for synchronous completion: */
+		struct {
+			struct iov_iter		*iter;
+			struct task_struct	*waiter;
+		} submit;
+
+		/* used for aio completion: */
+		struct {
+			struct work_struct	work;
+		} aio;
+	};
+};
+
+
 static inline sector_t iomap_sector(const struct iomap *iomap, loff_t pos)
 {
 	if (iomap->flags & IOMAP_F_ANON_WRITE)
@@ -202,6 +228,7 @@ struct iomap_write_ops {
 #endif /* CONFIG_FS_DAX */
 #define IOMAP_ATOMIC		(1 << 9) /* torn-write protection */
 #define IOMAP_DONTCACHE		(1 << 10)
+#define IOMAP_WRITETHROUGH	(1 << 11)
 
 struct iomap_ops {
 	/*
@@ -222,6 +249,12 @@ struct iomap_ops {
 	int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
 			ssize_t written, unsigned flags, struct iomap *iomap);
 };
+
+/*
+ * struct iomap_writethrough_args {
+ * 	struct iomap_writepage_ctx *wpc;
+ * };
+ */
 
 /**
  * struct iomap_iter - Iterate through a range of a file
@@ -253,6 +286,7 @@ struct iomap_iter {
 
 int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops);
 int iomap_iter_advance(struct iomap_iter *iter, u64 count);
+int iomap_writethrough_iter(struct iomap_iter *iter, struct iomap_dio *dio);
 
 /**
  * iomap_length_trim - trimmed length of the current iomap iteration
@@ -344,6 +378,11 @@ static inline bool iomap_want_unshare_iter(const struct iomap_iter *iter)
 ssize_t iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *from,
 		const struct iomap_ops *ops,
 		const struct iomap_write_ops *write_ops, void *private);
+ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
+				      const struct iomap_ops *ops,
+				      const struct iomap_write_ops *write_ops,
+				      struct iomap_writepage_ctx *wpc,
+				      void *private);
 void iomap_read_folio(const struct iomap_ops *ops,
 		struct iomap_read_folio_ctx *ctx, void *private);
 void iomap_readahead(const struct iomap_ops *ops,
@@ -459,6 +498,15 @@ struct iomap_writeback_ops {
 	int (*writeback_submit)(struct iomap_writepage_ctx *wpc, int error);
 };
 
+/*
+ * IOMAP_WRITEPAGE_WRITEBACK: Writing page via writeback path. ->wbc is not NULL
+ * IOMAP_WRITEPAGE_WRITETHROUGH: Writing page via writethrough path. ->wbc is NULL
+ */
+enum iomap_writepage_types {
+	IOMAP_WRITEPAGE_WRITEBACK,
+	IOMAP_WRITEPAGE_WRITETHROUGH
+};
+
 struct iomap_writepage_ctx {
 	struct iomap		iomap;
 	struct inode		*inode;
@@ -466,6 +514,7 @@ struct iomap_writepage_ctx {
 	const struct iomap_writeback_ops *ops;
 	u32			nr_folios;	/* folios added to the ioend */
 	void			*wb_ctx;	/* pending writeback context */
+	u8			type;
 };
 
 struct iomap_ioend *iomap_init_ioend(struct inode *inode, struct bio *bio,
@@ -484,6 +533,9 @@ void iomap_finish_folio_read(struct folio *folio, size_t off, size_t len,
 		int error);
 void iomap_finish_folio_write(struct inode *inode, struct folio *folio,
 		size_t len);
+int iomap_writeback_range(struct iomap_writepage_ctx *wpc,
+		struct folio *folio, u64 pos, u32 rlen, u64 end_pos,
+			  size_t *bytes_submitted);
 
 int iomap_writeback_folio(struct iomap_writepage_ctx *wpc, struct folio *folio);
 int iomap_writepages(struct iomap_writepage_ctx *wpc);

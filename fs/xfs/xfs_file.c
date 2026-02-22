@@ -3,6 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
+#include "linux/iomap.h"
 #include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
@@ -1010,9 +1011,24 @@ write_retry:
 		goto out;
 
 	trace_xfs_file_buffered_write(iocb, from);
-	ret = iomap_file_buffered_write(iocb, from,
-			&xfs_buffered_write_iomap_ops, &xfs_iomap_write_ops,
-			NULL);
+	if (iocb->ki_flags & IOCB_WRITETHROUGH) {
+		struct xfs_writepage_ctx	wpc = {
+			.ctx = {
+				.inode	= inode,
+				.wbc	= NULL,
+				.ops	= &xfs_writeback_ops,
+				.type	= IOMAP_WRITEPAGE_WRITETHROUGH,
+			},
+		};
+
+		ret = iomap_file_writethrough_write(iocb, from,
+						    &xfs_direct_write_iomap_ops,
+						    &xfs_iomap_write_ops,
+						    &wpc.ctx, NULL);
+	} else
+		ret = iomap_file_buffered_write(iocb, from,
+						&xfs_buffered_write_iomap_ops,
+						&xfs_iomap_write_ops, NULL);
 
 	/*
 	 * If we hit a space limit, try to free up some lingering preallocated

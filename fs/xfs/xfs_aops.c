@@ -23,12 +23,6 @@
 #include "xfs_zone_alloc.h"
 #include "xfs_rtgroup.h"
 
-struct xfs_writepage_ctx {
-	struct iomap_writepage_ctx ctx;
-	unsigned int		data_seq;
-	unsigned int		cow_seq;
-};
-
 static inline struct xfs_writepage_ctx *
 XFS_WPC(struct iomap_writepage_ctx *ctx)
 {
@@ -549,7 +543,7 @@ xfs_writeback_submit(
 	return iomap_ioend_writeback_submit(wpc, error);
 }
 
-static const struct iomap_writeback_ops xfs_writeback_ops = {
+const struct iomap_writeback_ops xfs_writeback_ops = {
 	.writeback_range	= xfs_writeback_range,
 	.writeback_submit	= xfs_writeback_submit,
 };

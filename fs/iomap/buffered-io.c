@@ -3,6 +3,9 @@
  * Copyright (C) 2010 Red Hat, Inc.
  * Copyright (C) 2016-2023 Christoph Hellwig.
  */
+#include "linux/fs.h"
+#include "linux/uio.h"
+#include "vdso/page.h"
 #include <linux/iomap.h>
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
@@ -1083,8 +1086,10 @@ static bool iomap_write_end(struct iomap_iter *iter, size_t len, size_t copied,
 	return __iomap_write_end(iter->inode, pos, len, copied, folio);
 }
 
-static int iomap_write_iter(struct iomap_iter *iter, struct iov_iter *i,
-		const struct iomap_write_ops *write_ops)
+static int iomap_write_iter(struct kiocb *iocb, struct iomap_iter *iter,
+			    struct iov_iter *i,
+			    const struct iomap_write_ops *write_ops,
+			    struct iomap_writepage_ctx *wpc)
 {
 	ssize_t total_written = 0;
 	int status = 0;
@@ -1158,10 +1163,97 @@ retry:
 			i_size_write(iter->inode, pos + written);
 			iter->iomap.flags |= IOMAP_F_SIZE_CHANGED;
 		}
+
+		/*
+		 * TODO: This happens before pagecache_isize_extent function
+		 * below. This might cause an issue where we don't zero out the
+		 * EOF block in the folio, before sending the IO. But we can't
+		 * keep if after that since that is after unlock and it locks
+		 * the folio in the function again.
+		 *
+		 * Deal later
+		 */
+		if (written && iter->flags & IOMAP_WRITETHROUGH) {
+			/*
+			 * Use the dio machinery to send a writethrough IO
+			 */
+			/*
+			 *  *\/
+			 * struct iomap_dio *dio;
+			 * struct bio_vec array[1];
+			 * struct iov_iter i_pagecache;
+			 * 
+			 * dio = kmalloc(sizeof(*dio), GFP_KERNEL);
+			 * if (!dio)
+			 * 	return -ENOMEM;
+			 * dio->iocb = iocb;
+			 * atomic_set(&dio->ref, 1);
+			 * dio->size = 0;
+			 * dio->i_size = i_size_read(iter->inode);
+			 * dio->dops = NULL;
+			 * dio->error = 0;
+			 * dio->flags = 0;
+			 * dio->done_before = 0;
+			 * 
+			 * /\*
+			 *  * TODO: Iterate over pages under write
+			 *  *\/
+			 * bvec_set_page(&array[0],
+			 * 	      folio_page(folio, folio->index),
+			 * 	      PAGE_SIZE, 0);
+			 * iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
+			 * 	      PAGE_SIZE);
+			 * 
+			 * dio->submit.iter = &i_pagecache;
+			 * dio->submit.waiter = current;
+			 */
+			/*
+			 * blk_start_plug(&plug);
+			 */
+
+			int error;
+			u64 off_aligned, end_aligned;
+			loff_t folio_end = folio_pos(folio) + folio_size(folio);
+
+			if (unlikely(!folio_prepare_writeback(
+				    mapping, WB_SYNC_NONE, folio))) {
+				WARN_ON(true);
+				/* Make written 0 so we go to error handling path */
+				written = 0;
+				goto put_folio;
+			}
+			/*
+			 * iter->status = iomap_writethrough_iter(iter, dio);
+			 */
+
+			off_aligned  = round_down(offset, i_blocksize(iter->inode));
+			end_aligned = round_up(offset + written, i_blocksize(iter->inode));
+
+			/* Right now we are only supporting for bs = ps */
+			error = iomap_writeback_folio(wpc, folio);
+			if (error) {
+				/*
+				 * Is marking written = 0 and failing the write
+				 * the correct way to go here?
+				 */
+				WARN_ON(true);
+				written = 0;
+				goto put_folio;
+			}
+
+
+			/*
+			 * blk_finish_plug(&plug);
+			 */
+
+		}
+
+put_folio:
 		__iomap_put_folio(iter, write_ops, written, folio);
 
 		if (old_size < pos)
 			pagecache_isize_extended(iter->inode, old_size, pos);
+
 
 		cond_resched();
 		if (unlikely(written == 0)) {
@@ -1209,7 +1301,7 @@ iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *i,
 		iter.flags |= IOMAP_DONTCACHE;
 
 	while ((ret = iomap_iter(&iter, ops)) > 0)
-		iter.status = iomap_write_iter(&iter, i, write_ops);
+		iter.status = iomap_write_iter(iocb, &iter, i, write_ops, NULL);
 
 	if (unlikely(iter.pos == iocb->ki_pos))
 		return ret;
@@ -1218,6 +1310,39 @@ iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *i,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(iomap_file_buffered_write);
+
+ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
+				      const struct iomap_ops *ops,
+				      const struct iomap_write_ops *write_ops,
+				      struct iomap_writepage_ctx *wpc,
+				      void *private)
+{
+	struct iomap_iter iter = {
+		.inode		= iocb->ki_filp->f_mapping->host,
+		.pos		= iocb->ki_pos,
+		.len		= iov_iter_count(i),
+		.flags		= IOMAP_WRITE,
+		.private	= private,
+	};
+	ssize_t ret;
+
+	if (iocb->ki_flags & IOCB_NOWAIT)
+		iter.flags |= IOMAP_NOWAIT;
+	if (iocb->ki_flags & IOCB_DONTCACHE)
+		iter.flags |= IOMAP_DONTCACHE;
+	if (iocb->ki_flags & IOCB_WRITETHROUGH)
+		iter.flags |= IOMAP_WRITETHROUGH;
+
+	while ((ret = iomap_iter(&iter, ops)) > 0)
+		iter.status = iomap_write_iter(iocb, &iter, i, write_ops, wpc);
+
+	if (unlikely(iter.pos == iocb->ki_pos))
+		return ret;
+	ret = iter.pos - iocb->ki_pos;
+	iocb->ki_pos = iter.pos;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(iomap_file_writethrough_write);
 
 static void iomap_write_delalloc_ifs_punch(struct inode *inode,
 		struct folio *folio, loff_t start_byte, loff_t end_byte,
@@ -1758,7 +1883,7 @@ void iomap_finish_folio_write(struct inode *inode, struct folio *folio,
 }
 EXPORT_SYMBOL_GPL(iomap_finish_folio_write);
 
-static int iomap_writeback_range(struct iomap_writepage_ctx *wpc,
+int iomap_writeback_range(struct iomap_writepage_ctx *wpc,
 		struct folio *folio, u64 pos, u32 rlen, u64 end_pos,
 		size_t *bytes_submitted)
 {
@@ -1896,6 +2021,19 @@ int iomap_writeback_folio(struct iomap_writepage_ctx *wpc, struct folio *folio)
 	if (error && pos > orig_pos)
 		fserror_report_io(inode, FSERR_BUFFERED_WRITE, orig_pos, 0,
 				  error, GFP_NOFS);
+
+	if (wpc->type == IOMAP_WRITEPAGE_WRITETHROUGH) {
+		/*
+		 * For writethrough, lets submit the bio once we are done
+		 * processing the folio
+		 *
+		 * This is okay to do even if error != 0. For more info refer
+		 * iomap_writepages()
+		 */
+		if (wpc->wb_ctx)
+			return wpc->ops->writeback_submit(wpc, error);
+	}
+
 
 	/*
 	 * We can have dirty bits set past end of file in page_mkwrite path

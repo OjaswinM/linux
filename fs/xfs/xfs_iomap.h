@@ -58,5 +58,12 @@ extern const struct iomap_ops xfs_xattr_iomap_ops;
 extern const struct iomap_ops xfs_dax_write_iomap_ops;
 extern const struct iomap_ops xfs_atomic_write_cow_iomap_ops;
 extern const struct iomap_write_ops xfs_iomap_write_ops;
+extern const struct iomap_writeback_ops xfs_writeback_ops;
+struct xfs_writepage_ctx {
+	struct iomap_writepage_ctx ctx;
+	unsigned int		data_seq;
+	unsigned int		cow_seq;
+};
+
 
 #endif /* __XFS_IOMAP_H__*/

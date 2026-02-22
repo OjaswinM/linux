@@ -107,13 +107,20 @@ static struct iomap_ioend *iomap_alloc_ioend(struct iomap_writepage_ctx *wpc,
 		loff_t pos, u16 ioend_flags)
 {
 	struct bio *bio;
+	int opf = REQ_OP_WRITE;
 
-	bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS,
-			       REQ_OP_WRITE | wbc_to_write_flags(wpc->wbc),
-			       GFP_NOFS, &iomap_ioend_bioset);
+	if (wpc->type == IOMAP_WRITEPAGE_WRITEBACK)
+		opf |= wbc_to_write_flags(wpc->wbc);
+	else if (wpc->type == IOMAP_WRITEPAGE_WRITETHROUGH)
+		/* This is mimicking RWF_DONTCACHE */
+		opf |= REQ_BACKGROUND;
+
+	bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS, opf, GFP_NOFS,
+			       &iomap_ioend_bioset);
 	bio->bi_iter.bi_sector = iomap_sector(&wpc->iomap, pos);
 	bio->bi_write_hint = wpc->inode->i_write_hint;
-	wbc_init_bio(wpc->wbc, bio);
+	if (wpc->type == IOMAP_WRITEPAGE_WRITEBACK)
+		wbc_init_bio(wpc->wbc, bio);
 	wpc->nr_folios = 0;
 	return iomap_init_ioend(wpc->inode, bio, pos, ioend_flags);
 }
@@ -245,7 +252,8 @@ new_ioend:
 	if (ioend->io_offset + ioend->io_size > end_pos)
 		ioend->io_size = end_pos - ioend->io_offset;
 
-	wbc_account_cgroup_owner(wpc->wbc, folio, map_len);
+	if (wpc->type == IOMAP_WRITEPAGE_WRITEBACK)
+		wbc_account_cgroup_owner(wpc->wbc, folio, map_len);
 	return map_len;
 }
 EXPORT_SYMBOL_GPL(iomap_add_to_ioend);

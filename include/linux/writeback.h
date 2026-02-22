@@ -370,6 +370,9 @@ bool redirty_page_for_writepage(struct writeback_control *, struct page *);
 void sb_mark_inode_writeback(struct inode *inode);
 void sb_clear_inode_writeback(struct inode *inode);
 
+bool folio_prepare_writeback(struct address_space *mapping,
+			     enum writeback_sync_modes sync_mode,
+			     struct folio *folio);
 /*
  * 4MB minimal write chunk size
  */
