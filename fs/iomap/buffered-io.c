@@ -4,6 +4,8 @@
  * Copyright (C) 2016-2023 Christoph Hellwig.
  */
 #include "linux/fs.h"
+#include "linux/page-flags.h"
+#include "linux/pagemap.h"
 #include "linux/uio.h"
 #include "vdso/page.h"
 #include <linux/iomap.h>
@@ -1199,8 +1201,23 @@ retry:
 				goto put_folio;
 			}
 
-			iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
+			folio_start_writeback(folio);
+
+			status = iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
 				     wt_ops->dio_ops, dio_flags, NULL, 0);
+			if (status < 0)
+				/*
+				 * Reject the write if writethrough failed.
+				 */
+				written = 0;
+
+			/*
+			 * For synchronous IOs we are sure that IO is complete
+			 * by the time we reach here.
+			 *
+			 * TODO: Check this for async buf IO.
+			 */
+			folio_end_writeback(folio);
 
 			/*
 			 * TODO: We can exit and release folio lock after a
@@ -1210,6 +1227,9 @@ retry:
 			 * will need stable writes
 			 */
 
+			/*
+			 * TODO: do we need to clear the folio dirty at some point?
+			 */
 		}
 
 put_folio:
@@ -1490,8 +1510,10 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 	if (iocb->ki_flags & IOCB_WRITETHROUGH)
 		iter.flags |= IOMAP_WRITETHROUGH;
 
-	while ((ret = iomap_iter(&iter, wt_ops->ops)) > 0)
+	while ((ret = iomap_iter(&iter, wt_ops->ops)) > 0) {
+		WARN_ON(!(iter.iomap.type & (IOMAP_MAPPED || IOMAP_UNWRITTEN)));
 		iter.status = iomap_writethrough_iter(iocb, &iter, i, wt_ops);
+	}
 
 	if (unlikely(iter.pos == iocb->ki_pos))
 		return ret;
@@ -2124,7 +2146,8 @@ static bool iomap_writeback_handle_eof(struct folio *folio, struct inode *inode,
 	return true;
 }
 
-int iomap_writeback_folio(struct iomap_writepage_ctx *wpc, struct folio *folio)
+int
+iomap_writeback_folio(struct iomap_writepage_ctx *wpc, struct folio *folio)
 {
 	struct iomap_folio_state *ifs = folio->private;
 	struct inode *inode = wpc->inode;

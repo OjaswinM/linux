@@ -221,14 +221,16 @@ static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 		bio_iov_iter_unbounce(bio, !!dio->error,
 				dio->flags & IOMAP_DIO_USER_BACKED);
 		bio_put(bio);
-	} else if (dio->flags & IOMAP_DIO_BUF_WRITETHROUGH){
-		/*
-		 * For buffered writethrough needing stable writes we can ensure
-		 * stable writes by waiting on folios writeback bit hence we
-		 * should never need a bounce buffer.
-		 */
-		iomap_end_writethrough(bio);
-		bio_put(bio);
+	/*
+	 * } else if (dio->flags & IOMAP_DIO_BUF_WRITETHROUGH){
+	 * 	/\*
+	 * 	 * For buffered writethrough needing stable writes we can ensure
+	 * 	 * stable writes by waiting on folios writeback bit hence we
+	 * 	 * should never need a bounce buffer.
+	 * 	 *\/
+	 * 	iomap_end_writethrough(bio);
+	 * 	bio_put(bio);
+	 */
 	} else if (dio->flags & IOMAP_DIO_USER_BACKED) {
 		bio_check_pages_dirty(bio);
 	} else {
@@ -747,26 +749,34 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		 * Try to invalidate cache pages for the range we are writing.
 		 * If this invalidation fails, let the caller fall back to
 		 * buffered I/O.
+		 *
+		 * The execption is if we are using dio path for buffered
+		 * RWF_WRITETHROUGH in which case we cannot inavlidate the pages
+		 * as we are writing them through and already hold their
+		 * folio_lock. For the same reason, disable end of write invalidation
 		 */
-		ret = kiocb_invalidate_pages(iocb, iomi.len);
-		if (ret) {
-			if (ret != -EAGAIN) {
-				trace_iomap_dio_invalidate_fail(inode, iomi.pos,
-								iomi.len);
-				if (iocb->ki_flags & IOCB_ATOMIC) {
-					/*
-					 * folio invalidation failed, maybe
-					 * this is transient, unlock and see if
-					 * the caller tries again.
-					 */
-					ret = -EAGAIN;
-				} else {
-					/* fall back to buffered write */
-					ret = -ENOTBLK;
+		if (!(dio_flags & IOMAP_DIO_BUF_WRITETHROUGH)) {
+			ret = kiocb_invalidate_pages(iocb, iomi.len);
+			if (ret) {
+				if (ret != -EAGAIN) {
+					trace_iomap_dio_invalidate_fail(inode, iomi.pos,
+									iomi.len);
+					if (iocb->ki_flags & IOCB_ATOMIC) {
+						/*
+						* folio invalidation failed, maybe
+						* this is transient, unlock and see if
+						* the caller tries again.
+						*/
+						ret = -EAGAIN;
+					} else {
+						/* fall back to buffered write */
+						ret = -ENOTBLK;
+					}
 				}
+				goto out_free_dio;
 			}
-			goto out_free_dio;
-		}
+		} else
+			dio->flags |= IOMAP_DIO_NO_INVALIDATE;
 	}
 
 	if (!wait_for_completion && !inode->i_sb->s_dio_done_wq) {
