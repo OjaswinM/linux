@@ -199,20 +199,6 @@ static void iomap_dio_done(struct iomap_dio *dio)
 	iomap_dio_complete_work(&dio->aio.work);
 }
 
-static void iomap_end_writethrough(struct bio *bio)
-{
-	struct folio_iter fi;
-	int i = 0;
-
-	/* walk all folios in bio, ending writeback on them */
-	bio_for_each_folio_all(fi, bio) {
-		i++;
-		folio_end_writeback(fi.folio);
-	}
-
-	WARN_ON(i > 1);
-}
-
 static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 {
 	struct iomap_dio *dio = bio->bi_private;
@@ -221,16 +207,6 @@ static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 		bio_iov_iter_unbounce(bio, !!dio->error,
 				dio->flags & IOMAP_DIO_USER_BACKED);
 		bio_put(bio);
-	/*
-	 * } else if (dio->flags & IOMAP_DIO_BUF_WRITETHROUGH){
-	 * 	/\*
-	 * 	 * For buffered writethrough needing stable writes we can ensure
-	 * 	 * stable writes by waiting on folios writeback bit hence we
-	 * 	 * should never need a bounce buffer.
-	 * 	 *\/
-	 * 	iomap_end_writethrough(bio);
-	 * 	bio_put(bio);
-	 */
 	} else if (dio->flags & IOMAP_DIO_USER_BACKED) {
 		bio_check_pages_dirty(bio);
 	} else {

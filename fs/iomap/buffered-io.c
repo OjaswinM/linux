@@ -1186,6 +1186,11 @@ retry:
 			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
 			int reason, bs = i_blocksize(iter->inode);
 
+			/*
+			 * We pass WB_SYNC_ALL because we want to wait for the
+			 * folio's current writeback to complete.
+			 * Eventually if we force stable writes we might not need this.
+			 */
 			if (unlikely(!folio_prepare_writeback(
 				    mapping, WB_SYNC_ALL, folio, &reason))) {
 				char *r;
@@ -1250,11 +1255,6 @@ retry:
 			 * cleared writeback flag. This can have issue like
 			 * folio might get modified etc before IO. I think this
 			 * will need stable writes
-			 */
-
-			/*
-			 * TODO: do we need to clear the folio dirty at some point?. I think
-			 * we aalready do this in prepare_writeback()
 			 */
 		}
 
