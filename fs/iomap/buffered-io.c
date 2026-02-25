@@ -1106,6 +1106,7 @@ static int iomap_writethrough_iter(struct kiocb *iocb, struct iomap_iter *iter,
 		size_t copied;		/* Bytes copied from user */
 		u64 written;		/* Bytes have been written */
 		loff_t pos;
+		bool retry = true;
 
 		bytes = iov_iter_count(i);
 retry:
@@ -1217,11 +1218,14 @@ retry:
 
 			status = iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
 				     wt_ops->dio_ops, dio_flags, NULL, 0);
-			if (status < 0)
+			if (status < 0) {
 				/*
-				 * Reject the write if writethrough failed.
+				 * Reject the write if writethrough failed, else we can
+				 * end up in an infinite loop here.
 				 */
+				retry = false;
 				written = 0;
+			}
 
 			/*
 			 * For synchronous IOs we are sure that IO is complete
@@ -1261,6 +1265,9 @@ put_folio:
 			 */
 			iomap_write_failed(iter->inode, pos, bytes);
 			iov_iter_revert(i, copied);
+
+			if (!retry)
+				break;
 
 			if (chunk > PAGE_SIZE)
 				chunk /= 2;
@@ -1364,80 +1371,82 @@ retry:
 		 *
 		 * Deal later
 		 */
-		if (written && iter->flags & IOMAP_WRITETHROUGH) {
-			/*
-			 * Use the dio machinery to send a writethrough IO
-			 */
-			/*
-			 *  *\/
-			 * struct iomap_dio *dio;
-			 * struct bio_vec array[1];
-			 * struct iov_iter i_pagecache;
-			 * 
-			 * dio = kmalloc(sizeof(*dio), GFP_KERNEL);
-			 * if (!dio)
-			 * 	return -ENOMEM;
-			 * dio->iocb = iocb;
-			 * atomic_set(&dio->ref, 1);
-			 * dio->size = 0;
-			 * dio->i_size = i_size_read(iter->inode);
-			 * dio->dops = NULL;
-			 * dio->error = 0;
-			 * dio->flags = 0;
-			 * dio->done_before = 0;
-			 * 
-			 * /\*
-			 *  * TODO: Iterate over pages under write
-			 *  *\/
-			 * bvec_set_page(&array[0],
-			 * 	      folio_page(folio, folio->index),
-			 * 	      PAGE_SIZE, 0);
-			 * iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
-			 * 	      PAGE_SIZE);
-			 * 
-			 * dio->submit.iter = &i_pagecache;
-			 * dio->submit.waiter = current;
-			 */
-			/*
-			 * blk_start_plug(&plug);
-			 */
-
-			int error;
-			u64 off_aligned, end_aligned;
-			loff_t folio_end = folio_pos(folio) + folio_size(folio);
-
-			if (unlikely(!folio_prepare_writeback(
-				    mapping, WB_SYNC_NONE, folio))) {
-				WARN_ON(true);
-				/* Make written 0 so we go to error handling path */
-				written = 0;
-				goto put_folio;
-			}
-			/*
-			 * iter->status = iomap_writethrough_iter(iter, dio);
-			 */
-
-			off_aligned  = round_down(offset, i_blocksize(iter->inode));
-			end_aligned = round_up(offset + written, i_blocksize(iter->inode));
-
-			/* Right now we are only supporting for bs = ps */
-			error = iomap_writeback_folio(wpc, folio);
-			if (error) {
-				/*
-				 * Is marking written = 0 and failing the write
-				 * the correct way to go here?
-				 */
-				WARN_ON(true);
-				written = 0;
-				goto put_folio;
-			}
-
-
-			/*
-			 * blk_finish_plug(&plug);
-			 */
-
-		}
+		/*
+		 * if (written && iter->flags & IOMAP_WRITETHROUGH) {
+		 * 	/\*
+		 * 	 * Use the dio machinery to send a writethrough IO
+		 * 	 *\/
+		 * 	/\*
+		 * 	 *  *\\/
+		 * 	 * struct iomap_dio *dio;
+		 * 	 * struct bio_vec array[1];
+		 * 	 * struct iov_iter i_pagecache;
+		 * 	 * 
+		 * 	 * dio = kmalloc(sizeof(*dio), GFP_KERNEL);
+		 * 	 * if (!dio)
+		 * 	 * 	return -ENOMEM;
+		 * 	 * dio->iocb = iocb;
+		 * 	 * atomic_set(&dio->ref, 1);
+		 * 	 * dio->size = 0;
+		 * 	 * dio->i_size = i_size_read(iter->inode);
+		 * 	 * dio->dops = NULL;
+		 * 	 * dio->error = 0;
+		 * 	 * dio->flags = 0;
+		 * 	 * dio->done_before = 0;
+		 * 	 * 
+		 * 	 * /\\*
+		 * 	 *  * TODO: Iterate over pages under write
+		 * 	 *  *\\/
+		 * 	 * bvec_set_page(&array[0],
+		 * 	 * 	      folio_page(folio, folio->index),
+		 * 	 * 	      PAGE_SIZE, 0);
+		 * 	 * iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
+		 * 	 * 	      PAGE_SIZE);
+		 * 	 * 
+		 * 	 * dio->submit.iter = &i_pagecache;
+		 * 	 * dio->submit.waiter = current;
+		 * 	 *\/
+		 * 	/\*
+		 * 	 * blk_start_plug(&plug);
+		 * 	 *\/
+		 * 
+		 * 	int error;
+		 * 	u64 off_aligned, end_aligned;
+		 * 	loff_t folio_end = folio_pos(folio) + folio_size(folio);
+		 * 
+		 * 	if (unlikely(!folio_prepare_writeback(
+		 * 		    mapping, WB_SYNC_NONE, folio))) {
+		 * 		WARN_ON(true);
+		 * 		/\* Make written 0 so we go to error handling path *\/
+		 * 		written = 0;
+		 * 		goto put_folio;
+		 * 	}
+		 * 	/\*
+		 * 	 * iter->status = iomap_writethrough_iter(iter, dio);
+		 * 	 *\/
+		 * 
+		 * 	off_aligned  = round_down(offset, i_blocksize(iter->inode));
+		 * 	end_aligned = round_up(offset + written, i_blocksize(iter->inode));
+		 * 
+		 * 	/\* Right now we are only supporting for bs = ps *\/
+		 * 	error = iomap_writeback_folio(wpc, folio);
+		 * 	if (error) {
+		 * 		/\*
+		 * 		 * Is marking written = 0 and failing the write
+		 * 		 * the correct way to go here?
+		 * 		 *\/
+		 * 		WARN_ON(true);
+		 * 		written = 0;
+		 * 		goto put_folio;
+		 * 	}
+		 * 
+		 * 
+		 * 	/\*
+		 * 	 * blk_finish_plug(&plug);
+		 * 	 *\/
+		 * 
+		 * }
+		 */
 
 put_folio:
 		__iomap_put_folio(iter, write_ops, written, folio);
@@ -1515,6 +1524,12 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 	};
 	ssize_t ret;
 
+	/*
+	 * For now we only support single-page, aligned writes.
+	 */
+	if ((iter.pos | iter.len) & (PAGE_SIZE - 1))
+		return -EINVAL;
+
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		iter.flags |= IOMAP_NOWAIT;
 	if (iocb->ki_flags & IOCB_DONTCACHE)
@@ -1523,7 +1538,8 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 		iter.flags |= IOMAP_WRITETHROUGH;
 
 	while ((ret = iomap_iter(&iter, wt_ops->ops)) > 0) {
-		WARN_ON(!(iter.iomap.type & (IOMAP_MAPPED || IOMAP_UNWRITTEN)));
+		WARN_ON(iter.iomap.type != IOMAP_UNWRITTEN &&
+			iter.iomap.type != IOMAP_MAPPED);
 		iter.status = iomap_writethrough_iter(iocb, &iter, i, wt_ops);
 	}
 
