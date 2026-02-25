@@ -1181,6 +1181,7 @@ retry:
 			struct bio_vec array[1];
 			struct iov_iter i_pagecache;
 			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
+			int reason;
 
 
 			/*
@@ -1194,8 +1195,19 @@ retry:
 				      PAGE_SIZE);
 
 			if (unlikely(!folio_prepare_writeback(
-				    mapping, WB_SYNC_NONE, folio))) {
-				WARN_ON(true);
+				    mapping, WB_SYNC_ALL, folio, &reason))) {
+				char *r;
+
+				if (reason == 1)
+					r = "mapping null";
+				else if (reason == 2)
+					r = "folio dirty";
+				else if (reason == 3)
+					r = "clear dirty for IO";
+				else if (reason == 4)
+					r = "ongoing writeback";
+
+				WARN(true, "Reason: %s", r);
 				/* Make written 0 so we go to error handling path */
 				written = 0;
 				goto put_folio;

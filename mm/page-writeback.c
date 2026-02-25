@@ -2359,7 +2359,8 @@ void tag_pages_for_writeback(struct address_space *mapping,
 EXPORT_SYMBOL(tag_pages_for_writeback);
 
 bool folio_prepare_writeback(struct address_space *mapping,
-		 enum writeback_sync_modes sync_mode, struct folio *folio)
+			     enum writeback_sync_modes sync_mode,
+			     struct folio *folio, int *reason)
 {
 	/*
 	 * Folio truncated or invalidated. We can freely skip it then,
@@ -2368,28 +2369,39 @@ bool folio_prepare_writeback(struct address_space *mapping,
 	 * data integrity operation even if there is now a new, dirty
 	 * folio at the same pagecache index.
 	 */
-	if (unlikely(folio->mapping != mapping))
+	if (unlikely(folio->mapping != mapping)) {
+		if (reason)
+			*reason = 1;
 		return false;
+	}
 
 	/*
 	 * Did somebody else write it for us?
 	 */
-	if (!folio_test_dirty(folio))
+	if (!folio_test_dirty(folio)) {
+		if (reason)
+			*reason = 2;
 		return false;
+	}
 
 	if (folio_test_writeback(folio)) {
-		if (sync_mode == WB_SYNC_NONE)
+		if (sync_mode == WB_SYNC_NONE) {
+			if (reason)
+				*reason = 4;
 			return false;
+		}
 		folio_wait_writeback(folio);
 	}
 	BUG_ON(folio_test_writeback(folio));
 
-	if (!folio_clear_dirty_for_io(folio))
+	if (!folio_clear_dirty_for_io(folio)) {
+		if (reason)
+			*reason = 3;
 		return false;
+	}
 
 	return true;
 }
-
 
 static pgoff_t wbc_end(struct writeback_control *wbc)
 {
@@ -2416,7 +2428,7 @@ retry:
 	}
 
 	folio_lock(folio);
-	if (unlikely(!folio_prepare_writeback(mapping, wbc->sync_mode, folio))) {
+	if (unlikely(!folio_prepare_writeback(mapping, wbc->sync_mode, folio, NULL))) {
 		folio_unlock(folio);
 		goto retry;
 	}
