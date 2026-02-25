@@ -1088,6 +1088,35 @@ static bool iomap_write_end(struct iomap_iter *iter, size_t len, size_t copied,
 	return __iomap_write_end(iter->inode, pos, len, copied, folio);
 }
 
+struct iomap_writethrough_ctx {
+	struct kiocb iocb;
+	struct folio *folio;
+	struct inode *inode;
+};
+
+static void iomap_writethrough_endio(struct kiocb *iocb, long ret)
+{
+	struct iomap_writethrough_ctx *wt_ctx =
+		container_of(iocb, struct iomap_writethrough_ctx, iocb);
+	struct inode *inode = wt_ctx->inode;
+
+	/*
+	 * NOTE: Is ret always < 0 for short writes? ioend_writeback_end_io
+	 * seems to suggest so.
+	 */
+	if (ret < 0) {
+		mapping_set_error(inode->i_mapping, ret);
+		pr_err_ratelimited(
+			"%s: writeback error on inode %lu, offset %lld",
+			inode->i_sb->s_id, inode->i_ino, iocb->ki_pos);
+	}
+
+	folio_end_writeback(wt_ctx->folio);
+	kiocb_end_write(iocb);
+	fput(iocb->ki_filp);
+	kfree(wt_ctx);
+}
+
 static int iomap_writethrough_iter(struct kiocb *iocb, struct iomap_iter *iter,
 				   struct iov_iter *i,
 				   const struct iomap_writethrough_ops *wt_ops)
@@ -1185,6 +1214,15 @@ retry:
 			u64 len_aligned;
 			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
 			int reason, bs = i_blocksize(iter->inode);
+			struct iomap_writethrough_ctx *wt_ctx;
+
+			wt_ctx = kmalloc(sizeof(struct iomap_writethrough_ctx),
+					GFP_KERNEL);
+			if (!wt_ctx) {
+				written = 0;
+				status = -ENOMEM;
+				goto put_folio;
+			}
 
 			/*
 			 * We pass WB_SYNC_ALL because we want to wait for the
@@ -1207,7 +1245,7 @@ retry:
 				WARN(true, "Reason: %s", r);
 				/* Make written 0 so we go to error handling path */
 				written = 0;
-				goto put_folio;
+				goto free_wt_ctx;
 			}
 
 			folio_start_writeback(folio);
@@ -1229,25 +1267,46 @@ retry:
 			 * simplicity just enforce this restrictions for now.
 			 */
 			WARN_ON(iocb->ki_pos & (bs - 1));
-			status = iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
-				     wt_ops->dio_ops, dio_flags, NULL, 0);
+
+			/*
+			 * Clone the iocb because we will be sending async dio,
+			 * which needs the iocb to exist atleast till the endio
+			 * time. We cannot guarantee that with the current iocb
+			 * since we are coming from a sync path.
+			 */
+			kiocb_clone(&wt_ctx->iocb, iocb, iocb->ki_filp);
+			get_file(iocb->ki_filp);
+
+			/*
+			 * prepare the async iocb and context which will be used
+			 * in endio
+			 */
+			/*
+			 * TODO: On error what happens to pos and other offset
+			 * bytes and error handling?
+			 */
+			wt_ctx->iocb.ki_pos = pos;
+			wt_ctx->iocb.ki_complete = iomap_writethrough_endio;
+			wt_ctx->folio = folio;
+			wt_ctx->inode = iter->inode;
+
+			status = iomap_dio_rw(&wt_ctx->iocb, &i_pagecache,
+					      wt_ops->ops, wt_ops->dio_ops,
+					      dio_flags, NULL, 0);
+
+			if (status == -EIOCBQUEUED)
+				goto put_folio;
+
 			if (status < 0) {
 				/*
-				 * Reject the write if writethrough failed, else we can
-				 * end up in an infinite loop here.
+				 * Reject the write if writethrough failed, else
+				 * we can end up in an infinite loop here incase
+				 * it keeps failing everytime.
 				 */
 				retry = false;
 				written = 0;
+				goto end_wb;
 			}
-
-			/*
-			 * For synchronous IOs we are sure that IO is complete
-			 * by the time we reach here.
-			 *
-			 * TODO: Check this for async buf IO. Maybe this needs
-			 * to go into end io completion
-			 */
-			folio_end_writeback(folio);
 
 			/*
 			 * TODO: We can exit and release folio lock after a
@@ -1256,6 +1315,11 @@ retry:
 			 * folio might get modified etc before IO. I think this
 			 * will need stable writes
 			 */
+end_wb:
+			folio_end_writeback(folio);
+free_wt_ctx:
+			if (wt_ctx)
+				kfree(wt_ctx);
 		}
 
 put_folio:

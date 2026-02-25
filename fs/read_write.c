@@ -1054,14 +1054,23 @@ static ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 	if (ret < 0)
 		goto out;
 
+	/*
+	 * For writethrough buffered writes we trigger an async IO so the
+	 * corresponding sb_end_write() call happens in its ->endio handler.
+	 * Hence, add lockdep annotations to avoid warnings. This is basically
+	 * open coding kiocb_start_write() since we dont have an iocb yet.
+	 */
 	file_start_write(file);
+	if (flags & RWF_WRITETHROUGH)
+		__sb_writers_release(file_inode(file)->i_sb, SB_FREEZE_WRITE);
 	if (file->f_op->write_iter)
 		ret = do_iter_readv_writev(file, &iter, pos, WRITE, flags);
 	else
 		ret = do_loop_readv_writev(file, &iter, pos, WRITE, flags);
 	if (ret > 0)
 		fsnotify_modify(file);
-	file_end_write(file);
+	if (!(flags & RWF_WRITETHROUGH))
+		file_end_write(file);
 out:
 	kfree(iov);
 	return ret;
