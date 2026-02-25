@@ -1181,19 +1181,10 @@ retry:
 			 */
 			struct bio_vec array[1];
 			struct iov_iter i_pagecache;
+			size_t off_aligned;
+			u64 len_aligned;
 			int dio_flags = IOMAP_DIO_BUF_WRITETHROUGH;
-			int reason;
-
-
-			/*
-			 * TODO: Iterate over pages under write instead of
-			 * single page
-			 */
-			bvec_set_page(&array[0],
-				      folio_page(folio, folio->index),
-				      PAGE_SIZE, 0);
-			iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
-				      PAGE_SIZE);
+			int reason, bs = i_blocksize(iter->inode);
 
 			if (unlikely(!folio_prepare_writeback(
 				    mapping, WB_SYNC_ALL, folio, &reason))) {
@@ -1216,6 +1207,23 @@ retry:
 
 			folio_start_writeback(folio);
 
+			off_aligned = round_down(offset, bs);
+			len_aligned = round_up(written, bs);
+			bvec_set_folio(&array[0],
+				       folio, len_aligned, off_aligned);
+			iov_iter_bvec(&i_pagecache, ITER_SOURCE, array, 1,
+				      len_aligned);
+
+			/*
+			 * TODO: iocb->ki_pos is what user passed. For now we need
+			 * to have a restriction that pos is block aligned. This
+			 * is because dio does IO in block size units and it
+			 * cant accept unaligned offset. To have this, we will
+			 * need to change the iocb->pos from what user supplied,
+			 * and Im not sure of its side effects yet. Hence, for
+			 * simplicity just enforce this restrictions for now.
+			 */
+			WARN_ON(iocb->ki_pos & (bs - 1));
 			status = iomap_dio_rw(iocb, &i_pagecache, wt_ops->ops,
 				     wt_ops->dio_ops, dio_flags, NULL, 0);
 			if (status < 0) {
@@ -1231,7 +1239,8 @@ retry:
 			 * For synchronous IOs we are sure that IO is complete
 			 * by the time we reach here.
 			 *
-			 * TODO: Check this for async buf IO.
+			 * TODO: Check this for async buf IO. Maybe this needs
+			 * to go into end io completion
 			 */
 			folio_end_writeback(folio);
 
@@ -1244,7 +1253,8 @@ retry:
 			 */
 
 			/*
-			 * TODO: do we need to clear the folio dirty at some point?
+			 * TODO: do we need to clear the folio dirty at some point?. I think
+			 * we aalready do this in prepare_writeback()
 			 */
 		}
 
