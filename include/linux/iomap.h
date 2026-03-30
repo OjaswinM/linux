@@ -358,6 +358,8 @@ void iomap_readahead(const struct iomap_ops *ops,
 		struct iomap_read_folio_ctx *ctx, void *private);
 bool iomap_is_partially_uptodate(struct folio *, size_t from, size_t count);
 struct folio *iomap_get_folio(struct iomap_iter *iter, loff_t pos, size_t len);
+struct folio *iomap_get_folio_writethrough(struct iomap_iter *iter, loff_t pos,
+					   size_t len);
 bool iomap_release_folio(struct folio *folio, gfp_t gfp_flags);
 void iomap_invalidate_folio(struct folio *folio, size_t offset, size_t len);
 bool iomap_dirty_folio(struct address_space *mapping, struct folio *folio);
@@ -467,6 +469,8 @@ struct iomap_writeback_ops {
 	int (*writeback_submit)(struct iomap_writepage_ctx *wpc, int error);
 };
 
+#define IOSTART_F_SHARED 0x1
+
 struct iomap_writepage_ctx {
 	struct iomap		iomap;
 	struct inode		*inode;
@@ -474,6 +478,22 @@ struct iomap_writepage_ctx {
 	const struct iomap_writeback_ops *ops;
 	u32			nr_folios;	/* folios added to the ioend */
 	void			*wb_ctx;	/* pending writeback context */
+};
+
+struct iomap_writethrough_folio_info {
+	size_t off_aligned;
+	size_t len_aligned;
+	struct folio *folio;
+};
+
+struct iomap_writethrough_io_start {
+	loff_t io_pos;
+	sector_t sector;
+	struct block_device *bdev;
+	unsigned int nr_bvecs;
+	struct list_head io_start_node;
+	int flags;
+	struct iomap_writethrough_folio_info fl[];
 };
 
 struct iomap_writethrough_ctx {
@@ -497,11 +517,10 @@ struct iomap_writethrough_ctx {
 		struct work_struct	aio_work;
 	};
 
-	loff_t			bio_pos;
-	unsigned int		nr_bvecs;
 	unsigned int		max_bvecs;
-	struct bio_vec		bvec[];
-
+	unsigned int		nr_io_starts;
+	struct list_head io_start_list;
+	struct folio		*prev_folio;
 };
 
 struct iomap_ioend *iomap_init_ioend(struct inode *inode, struct bio *bio,
@@ -637,12 +656,18 @@ struct iomap_writethrough_ops {
 	const struct iomap_ops *ops;
 	const struct iomap_write_ops *write_ops;
 	const struct iomap_dio_ops *dops;
-	int (*writethrough_submit)(struct inode *inode, struct iomap *iomap,
-				   loff_t offset, u64 len);
+	int (*writethrough_submit)(struct inode *inode, loff_t offset, u64 len,
+				   int flags);
 };
-ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
-				      const struct iomap_writethrough_ops *wt_ops,
-				      void *private);
+
+ssize_t
+iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
+			      struct iomap_writethrough_ctx *wt_ctx,
+			      const struct iomap_writethrough_ops *wt_ops,
+			      void *private);
+ssize_t iomap_writethrough_file_submit(struct iomap_writethrough_ctx *wt_ctx,
+				       const struct iomap_writethrough_ops *wt_ops);
+void iomap_file_writethrough_cancel(struct kiocb *iocb, struct iomap_writethrough_ctx *wt_ctx);
 
 #ifdef CONFIG_SWAP
 struct file;

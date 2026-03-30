@@ -457,6 +457,7 @@ void truncate_inode_pages_range(struct address_space *mapping,
 
 			folio_lock(folio);
 			VM_BUG_ON_FOLIO(!folio_contains(folio, indices[i]), folio);
+			pr_alert("%s: Waiting for folio %px \n", __func__, folio);
 			folio_wait_writeback(folio);
 			truncate_inode_folio(mapping, folio);
 			folio_unlock(folio);

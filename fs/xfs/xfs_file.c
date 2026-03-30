@@ -3,6 +3,8 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
+#include "linux/fs.h"
+#include "linux/iomap.h"
 #include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
@@ -432,6 +434,8 @@ xfs_file_write_zero_eof(
 		 * before we are given the XFS_IOLOCK_EXCL, and so for most
 		 * cases this wait is a no-op.
 		 */
+		pr_alert("%s: Waiting for dio on inode %lld\n", __func__,
+			 VFS_I(ip)->i_ino);
 		inode_dio_wait(VFS_I(ip));
 		*drained_dio = true;
 		return 1;
@@ -1034,9 +1038,9 @@ out:
 static int
 xfs_writethrough_submit(
 	struct inode		*inode,
-	struct iomap		*iomap,
 	loff_t			offset,
-	u64			count)
+	u64			count,
+	int			flags)
 {
 	int error = 0;
 	unsigned int		nofs_flag;
@@ -1047,7 +1051,7 @@ xfs_writethrough_submit(
 	 * We are under writethrough context with folio lock possibly held. To
 	 * avoid memory allocation deadlocks, set the task-wide nofs context.
 	 */
-	if (iomap->flags & IOMAP_F_SHARED) {
+	if (flags & IOSTART_F_SHARED) {
 		nofs_flag = memalloc_nofs_save();
 		error = xfs_reflink_convert_cow(XFS_I(inode), offset, count);
 		memalloc_nofs_restore(nofs_flag);
@@ -1063,6 +1067,101 @@ const struct iomap_writethrough_ops xfs_writethrough_ops = {
 	.writethrough_submit	= &xfs_writethrough_submit
 };
 
+STATIC ssize_t
+xfs_file_writethrough_write(
+	struct kiocb		*iocb,
+	struct iov_iter		*from)
+{
+	struct inode		*inode = iocb->ki_filp->f_mapping->host;
+	struct xfs_inode	*ip = XFS_I(inode);
+	ssize_t			ret;
+	bool			cleared_space = false;
+	unsigned int		iolock;
+	struct iomap_writethrough_ctx *wt_ctx;
+	unsigned int max_bvecs;
+
+	/*
+	 * +1 to max bvecs to account for unaligned write spanning multiple
+	 * folios
+	 */
+	max_bvecs = DIV_ROUND_UP(
+		iov_iter_count(from),
+		PAGE_SIZE << mapping_min_folio_order(inode->i_mapping)) + 1;
+
+	if (max_bvecs > BIO_MAX_VECS)
+		max_bvecs = BIO_MAX_VECS;
+	if (!max_bvecs)
+		max_bvecs = 1;
+
+write_retry:
+	wt_ctx = kzalloc(sizeof(struct iomap_writethrough_ctx), GFP_NOFS);
+	if (!wt_ctx)
+		return -ENOMEM;
+
+	wt_ctx->max_bvecs = max_bvecs;
+	INIT_LIST_HEAD(&wt_ctx->io_start_list);
+
+	iolock = XFS_IOLOCK_EXCL;
+	ret = xfs_ilock_iocb(iocb, iolock);
+	if (ret)
+		return ret;
+
+	ret = xfs_file_write_checks(iocb, from, &iolock, NULL);
+	if (ret)
+		goto out;
+
+	trace_xfs_file_buffered_write(iocb, from);
+	ret = iomap_file_writethrough_write(iocb, from, wt_ctx,
+					    &xfs_writethrough_ops, NULL);
+
+	if (ret < 0)
+		iomap_file_writethrough_cancel(iocb, wt_ctx);
+
+	/*
+	 * If we hit a space limit, try to free up some lingering preallocated
+	 * space before returning an error. In the case of ENOSPC, first try to
+	 * write back all dirty inodes to free up some of the excess reserved
+	 * metadata space. This reduces the chances that the eofblocks scan
+	 * waits on dirty mappings. Since xfs_flush_inodes() is serialized, this
+	 * also behaves as a filter to prevent too many eofblocks scans from
+	 * running at the same time.  Use a synchronous scan to increase the
+	 * effectiveness of the scan.
+	 */
+	if (ret == -EDQUOT && !cleared_space) {
+		xfs_iunlock(ip, iolock);
+		xfs_blockgc_free_quota(ip, XFS_ICWALK_FLAG_SYNC);
+		cleared_space = true;
+		goto write_retry;
+	} else if (ret == -ENOSPC && !cleared_space) {
+		struct xfs_icwalk	icw = {0};
+
+		cleared_space = true;
+		xfs_flush_inodes(ip->i_mount);
+
+		xfs_iunlock(ip, iolock);
+		icw.icw_flags = XFS_ICWALK_FLAG_SYNC;
+		xfs_blockgc_free_space(ip->i_mount, &icw);
+		goto write_retry;
+	}
+
+out:
+	if (iolock)
+		xfs_iunlock(ip, iolock);
+
+	/*
+	 * Now that the inode lock is released, submit IOs and wait for
+	 * completion. This allows other operations to proceed while we
+	 * wait for writethrough IO to complete.
+	 * iomap_writethrough_file_submit() handles cleanup of wt_ctx.
+	 */
+	if (ret >= 0) {
+		ret = iomap_writethrough_file_submit(wt_ctx,
+						     &xfs_writethrough_ops);
+		XFS_STATS_ADD(ip->i_mount, xs_write_bytes, ret);
+	}
+
+	return ret;
+}
 
 STATIC ssize_t
 xfs_file_buffered_write(
@@ -1086,14 +1185,9 @@ write_retry:
 		goto out;
 
 	trace_xfs_file_buffered_write(iocb, from);
-	if (iocb->ki_flags & IOCB_WRITETHROUGH) {
-		ret = iomap_file_writethrough_write(iocb, from,
-						    &xfs_writethrough_ops, NULL);
-	} else
-		ret = iomap_file_buffered_write(iocb, from,
-						&xfs_buffered_write_iomap_ops,
-						&xfs_iomap_write_ops, NULL);
-
+	ret = iomap_file_buffered_write(iocb, from,
+					&xfs_buffered_write_iomap_ops,
+					&xfs_iomap_write_ops, NULL);
 	/*
 	 * If we hit a space limit, try to free up some lingering preallocated
 	 * space before returning an error. In the case of ENOSPC, first try to
@@ -1127,12 +1221,7 @@ out:
 
 	if (ret > 0) {
 		XFS_STATS_ADD(ip->i_mount, xs_write_bytes, ret);
-		/*
-		 * Handle various SYNC-type writes.
-		 * For writethrough, we handle sync during completion.
-		 */
-		if (!(iocb->ki_flags & IOCB_WRITETHROUGH))
-			ret = generic_write_sync(iocb, ret);
+		ret = generic_write_sync(iocb, ret);
 	}
 	return ret;
 }
@@ -1246,6 +1335,9 @@ xfs_file_write_iter(
 
 	if (xfs_is_zoned_inode(ip))
 		return xfs_file_buffered_write_zoned(iocb, from);
+
+	if (iocb->ki_flags & IOCB_WRITETHROUGH)
+		return xfs_file_writethrough_write(iocb, from);
 	return xfs_file_buffered_write(iocb, from);
 }
 

@@ -529,6 +529,15 @@ static void __filemap_fdatawait_range(struct address_space *mapping,
 		for (i = 0; i < nr_folios; i++) {
 			struct folio *folio = fbatch.folios[i];
 
+			/* Only print debug info for XFS inodes */
+			/*
+			 * if (folio->mapping && folio->mapping->host &&
+			 *     folio->mapping->host->i_sb &&
+			 *     strcmp(folio->mapping->host->i_sb->s_type->name, "xfs") == 0) {
+			 * 	pr_alert("%s: Waiting for writeback on folio %px \n",
+			 * 		 __func__, folio);
+			 * }
+			 */
 			folio_wait_writeback(folio);
 		}
 		folio_batch_release(&fbatch);

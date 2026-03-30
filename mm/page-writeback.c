@@ -2401,6 +2401,7 @@ static bool folio_prepare_writeback(struct address_space *mapping,
 	if (folio_test_writeback(folio)) {
 		if (wbc->sync_mode == WB_SYNC_NONE)
 			return false;
+		pr_alert("%s: Waiting for folio: %px \n", __func__, folio);
 		folio_wait_writeback(folio);
 	}
 	BUG_ON(folio_test_writeback(folio));

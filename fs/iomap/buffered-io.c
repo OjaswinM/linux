@@ -3,6 +3,7 @@
  * Copyright (C) 2010 Red Hat, Inc.
  * Copyright (C) 2016-2023 Christoph Hellwig.
  */
+#include "linux/pagemap.h"
 #include <linux/iomap.h>
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
@@ -713,6 +714,30 @@ EXPORT_SYMBOL_GPL(iomap_is_partially_uptodate);
  * Returns a locked reference to the folio at @pos, or an error pointer if the
  * folio could not be obtained.
  */
+struct folio *iomap_get_folio_writethrough(struct iomap_iter *iter, loff_t pos, size_t len)
+{
+	fgf_t fgp = FGP_WRITETHROUGHBEGIN | FGP_NOFS;
+
+	if (iter->flags & IOMAP_NOWAIT)
+		fgp |= FGP_NOWAIT;
+	if (iter->flags & IOMAP_DONTCACHE)
+		fgp |= FGP_DONTCACHE;
+	fgp |= fgf_set_order(len);
+
+	return __filemap_get_folio(iter->inode->i_mapping, pos >> PAGE_SHIFT,
+			fgp, mapping_gfp_mask(iter->inode->i_mapping));
+}
+EXPORT_SYMBOL_GPL(iomap_get_folio_writethrough);
+
+/**
+ * iomap_get_folio - get a folio reference for writing
+ * @iter: iteration structure
+ * @pos: start offset of write
+ * @len: Suggested size of folio to create.
+ *
+ * Returns a locked reference to the folio at @pos, or an error pointer if the
+ * folio could not be obtained.
+ */
 struct folio *iomap_get_folio(struct iomap_iter *iter, loff_t pos, size_t len)
 {
 	fgf_t fgp = FGP_WRITEBEGIN | FGP_NOFS;
@@ -862,7 +887,7 @@ static int __iomap_write_begin(const struct iomap_iter *iter,
 }
 
 static struct folio *__iomap_get_folio(struct iomap_iter *iter,
-		const struct iomap_write_ops *write_ops, size_t len)
+				       const struct iomap_write_ops *write_ops, size_t len)
 {
 	loff_t pos = iter->pos;
 
@@ -894,7 +919,11 @@ static struct folio *__iomap_get_folio(struct iomap_iter *iter,
 
 	if (write_ops && write_ops->get_folio)
 		return write_ops->get_folio(iter, pos, len);
-	return iomap_get_folio(iter, pos, len);
+
+	if (iter->iomap.flags | IOMAP_WRITETHROUGH)
+		return iomap_get_folio_writethrough(iter, pos, len);
+	else
+		return iomap_get_folio(iter, pos, len);
 }
 
 static void __iomap_put_folio(struct iomap_iter *iter,
@@ -943,7 +972,7 @@ static int iomap_write_begin_inline(const struct iomap_iter *iter,
  */
 static int iomap_write_begin(struct iomap_iter *iter,
 		const struct iomap_write_ops *write_ops, struct folio **foliop,
-		size_t *poffset, u64 *plen)
+			      size_t *poffset, u64 *plen)
 {
 	const struct iomap *srcmap = iomap_iter_srcmap(iter);
 	loff_t pos;
@@ -1102,6 +1131,35 @@ static ssize_t iomap_writethrough_complete(struct iomap_writethrough_ctx *wt_ctx
 	struct kiocb *iocb	= wt_ctx->iocb;
 	struct inode *inode	= wt_ctx->inode;
 	ssize_t ret		= wt_ctx->error;
+	struct iomap_writethrough_io_start *io_start, *tmp;
+	struct folio *prev_folio = NULL;
+
+
+	/*
+	 * End writeback on all folios in 1 shot while taking care of repeating
+	 * folios
+	 */
+	list_for_each_entry(io_start, &wt_ctx->io_start_list, io_start_node) {
+		for (int i = 0; i < io_start->nr_bvecs; i++) {
+			struct folio *folio = io_start->fl[i].folio;
+
+			/*
+			 * pr_alert("%s: Ending writeback on folio %px\n",
+			 * 	 __func__, folio);
+			 */
+			if (prev_folio != folio)
+				folio_end_writeback(folio);
+			prev_folio = folio;
+		}
+	}
+
+	/* Clean up all io_start structures */
+	list_for_each_entry_safe(io_start, tmp, &wt_ctx->io_start_list,
+				 io_start_node) {
+		list_del(&io_start->io_start_node);
+		kfree(io_start);
+	}
+	wt_ctx->nr_io_starts = 0;
 
 	if (wt_ctx->dops && wt_ctx->dops->end_io) {
 		int err = wt_ctx->dops->end_io(iocb, wt_ctx->written,
@@ -1113,8 +1171,10 @@ static ssize_t iomap_writethrough_complete(struct iomap_writethrough_ctx *wt_ctx
 
 	mapping_clear_stable_writes(inode->i_mapping);
 
-	if (wt_ctx->is_aio)
-		inode_dio_end(inode);
+	/*
+	 * pr_alert("%s: Ending dio on inode %lld\n", __func__, inode->i_ino);
+	 */
+	inode_dio_end(inode);
 
 	if (!ret) {
 		ret = wt_ctx->written;
@@ -1160,19 +1220,23 @@ static void iomap_writethrough_done(struct iomap_writethrough_ctx *wt_ctx)
 static void iomap_writethrough_bio_end_io(struct bio *bio)
 {
 	struct iomap_writethrough_ctx *wt_ctx = bio->bi_private;
-	struct folio_iter fi;
 
 	if (bio->bi_status)
 		cmpxchg(&wt_ctx->error, 0,
 			blk_status_to_errno(bio->bi_status));
-	bio_for_each_folio_all(fi, bio)
-		folio_end_writeback(fi.folio);
+	/*
+	 * bio_for_each_folio_all(fi, bio) {
+	 * 	pr_alert("%s: Ending writeback on folio %px\n", __func__, fi.folio);
+	 * 	folio_end_writeback(fi.folio);
+	 * }
+	 */
 
 	bio_put(bio);
 	if (atomic_dec_and_test(&wt_ctx->ref))
 		iomap_writethrough_done(wt_ctx);
 }
 
+/* Old implementation - replaced by io_start based approach
 static void
 iomap_writethrough_submit_bio(struct iomap_writethrough_ctx *wt_ctx,
 			      struct iomap *iomap,
@@ -1210,27 +1274,52 @@ iomap_writethrough_submit_bio(struct iomap_writethrough_ctx *wt_ctx,
 	submit_bio(bio);
 	wt_ctx->nr_bvecs = 0;
 }
+*/
+
+static struct iomap_writethrough_io_start *
+iomap_writethrough_alloc_io_start(struct iomap_writethrough_ctx *wt_ctx)
+{
+	struct iomap_writethrough_io_start *io_start;
+
+	io_start = kzalloc(struct_size(io_start, fl, wt_ctx->max_bvecs),
+			   GFP_NOFS);
+	if (!io_start)
+		return NULL;
+
+	io_start->nr_bvecs = 0;
+	return io_start;
+}
+
+static void iomap_writethrough_add_io_start(struct iomap_writethrough_ctx *wt_ctx,
+					    struct iomap_writethrough_io_start *io_start)
+{
+	list_add_tail(&io_start->io_start_node, &wt_ctx->io_start_list);
+	wt_ctx->nr_io_starts++;
+}
 
 /**
  * iomap_writethrough_begin - prepare the various structures for writethrough
  * @folio: folio to prepare for writethrough
  * @off: offset of write within folio
  * @len: len of write within folio
+ * @already_prepared: have we already prepared this folio?
  *
  * This function does the major preparation work needed before starting the
  * writethrough. The main task is to prepare folio for writeththrough by blocking
  * mmap writes and setting writeback on it. Further, we must clear the write range
  * to non-dirty. If this results in the complete folio becoming non-dirty, then we
  * need to clear the master dirty bit.
+ *
+ * While performing writethrough, we might come across a folio which we have
+ * already prepared and queued for IO. For such folios, we can skip waiting for
+ * writeback since we will submit it later in one go. Similarly, we can also
+ * avoid starting writeback
  */
 static void iomap_folio_prepare_writethrough(struct folio *folio, size_t off,
-					     size_t len)
+					     size_t len, bool already_prepared)
 {
 	bool fully_written;
 	u64 zero = 0;
-
-	if (folio_test_writeback(folio))
-		folio_wait_writeback(folio);
 
 	if (folio_mkclean(folio))
 		folio_mark_dirty(folio);
@@ -1246,8 +1335,131 @@ static void iomap_folio_prepare_writethrough(struct folio *folio, size_t off,
 	    !iomap_find_dirty_range(folio, &zero, folio_size(folio)))
 		folio_clear_dirty_for_writethrough(folio);
 
-	folio_start_writeback(folio);
+	if (!already_prepared) {
+		/*
+		 * pr_alert("%s: Starting writeback on folio %px\n", __func__, folio);
+		 */
+		folio_start_writeback(folio);
+	}
 }
+
+static void iomap_writethrough_submit_io(struct iomap_writethrough_ctx *wt_ctx,
+					 const struct iomap_writethrough_ops *wt_ops)
+{
+	struct iomap_writethrough_io_start *io_start;
+	blk_opf_t opf = REQ_OP_WRITE;
+
+	if (wt_ctx->use_fua)
+		opf |= REQ_FUA;
+
+	list_for_each_entry(io_start, &wt_ctx->io_start_list, io_start_node) {
+		struct bio *bio;
+		unsigned int i;
+		u64 len = 0;
+
+		if (!io_start->nr_bvecs)
+			continue;
+
+		for (i = 0; i < io_start->nr_bvecs; i++)
+			len += io_start->fl[i].len_aligned;
+
+		if (wt_ops->writethrough_submit)
+			wt_ops->writethrough_submit(wt_ctx->inode,
+						    io_start->io_pos, len,
+						    io_start->flags);
+
+		bio = bio_alloc(io_start->bdev, io_start->nr_bvecs, opf, GFP_NOFS);
+		BUG_ON(!bio);
+
+		bio->bi_iter.bi_sector = io_start->sector;
+		bio->bi_end_io = iomap_writethrough_bio_end_io;
+		bio->bi_private = wt_ctx;
+
+		for (i = 0; i < io_start->nr_bvecs; i++) {
+			struct folio *folio = io_start->fl[i].folio;
+			size_t off_aligned = io_start->fl[i].off_aligned;
+			size_t len_aligned = io_start->fl[i].len_aligned;
+
+			if (!bio_add_folio(bio, folio, len_aligned, off_aligned))
+				/* This should ideally not happen (check?) */
+				BUG_ON(true);
+		}
+
+		atomic_inc(&wt_ctx->ref);
+		submit_bio(bio);
+	}
+}
+
+/**
+ * iomap_file_writethrough_cancel - Cancel the writethrough
+ * @wt_ctx: writethrough context from iomap_file_writethrough_write()
+ *
+ * This function cancels writeback on all accumulated io_starts and frees
+ * all the allocated resources.
+ */
+void iomap_file_writethrough_cancel(struct kiocb *iocb,
+				    struct iomap_writethrough_ctx *wt_ctx)
+{
+	struct iomap_writethrough_io_start *io_start, *tmp;
+	struct inode *inode = iocb->ki_filp->f_mapping->host;
+	struct folio *prev_folio = NULL;
+
+	/* End writeback on all folios that won't be submitted */
+	list_for_each_entry_safe(io_start, tmp, &wt_ctx->io_start_list,
+					io_start_node) {
+		for (int i = 0; i < io_start->nr_bvecs; i++) {
+			struct folio *folio = io_start->fl[i].folio;
+			/*
+			 * pr_alert("%s: Ending writeback on folio %px\n",
+			 * 	 __func__, folio);
+			 */
+			if (prev_folio != folio)
+				folio_end_writeback(folio);
+			prev_folio = folio;
+		}
+		list_del(&io_start->io_start_node);
+		kfree(io_start);
+	}
+	kfree(wt_ctx);
+
+	inode_dio_end(inode);
+	mapping_clear_stable_writes(inode->i_mapping);
+}
+EXPORT_SYMBOL_GPL(iomap_file_writethrough_cancel);
+
+/**
+ * iomap_writethrough_file_submit - Submit IOs and wait for completion
+ * @wt_ctx: writethrough context from iomap_file_writethrough_write()
+ *
+ * This function submits all accumulated io_starts as bios, then waits
+ * for completion (for sync IO) or returns immediately (for AIO).
+ * Should be called after releasing the inode lock.
+ *
+ * Returns: result from iomap_writethrough_complete() or -EIOCBQUEUED for AIO
+ */
+ssize_t iomap_writethrough_file_submit(struct iomap_writethrough_ctx *wt_ctx,
+				       const struct iomap_writethrough_ops *wt_ops)
+{
+	/* Submit all accumulated io_starts as bios */
+	iomap_writethrough_submit_io(wt_ctx, wt_ops);
+
+	/* Wait for completion if needed */
+	if (!atomic_dec_and_test(&wt_ctx->ref)) {
+		if (wt_ctx->is_aio)
+			return -EIOCBQUEUED;
+
+		for (;;) {
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			if (!READ_ONCE(wt_ctx->waiter))
+				break;
+			blk_io_schedule();
+		}
+		__set_current_state(TASK_RUNNING);
+	}
+
+	return iomap_writethrough_complete(wt_ctx);
+}
+EXPORT_SYMBOL_GPL(iomap_writethrough_file_submit);
 
 /**
  * iomap_writethrough_iter - perform RWF_WRITETHROUGH buffered write
@@ -1263,6 +1475,18 @@ static void iomap_folio_prepare_writethrough(struct folio *folio, size_t off,
  * Folio handling note: We might be writing through a partial folio so we need
  * to be careful to not clear the folio dirty bit unless there are no dirty blocks
  * in the folio after the writethrough.
+ *
+ * Writethrough batching note:
+ * For writethrough, we open code the FGP_STABLE behavior to handle the
+ * below corner case:
+ *
+ * In writethrough, we first start writeback on all folios and then send them
+ * for IO later. So we might have a case where we encounter a folio we have
+ * already started writeback on but not yet submitted. In which case we don't
+ * want to wait for writeback to avoid deadlocking. Also, if its a repeating
+ * folio then it must the folio we processed just before this one, hence we can
+ * make do with only maintaining a pointer to the folio processed immediate
+ * before the current one.
  */
 static int iomap_writethrough_iter(struct iomap_writethrough_ctx *wt_ctx,
 				   struct iomap_iter *iter, struct iov_iter *i,
@@ -1275,6 +1499,7 @@ static int iomap_writethrough_iter(struct iomap_writethrough_ctx *wt_ctx,
 	size_t chunk = mapping_max_folio_size(mapping);
 	unsigned int bdp_flags = (iter->flags & IOMAP_NOWAIT) ? BDP_ASYNC : 0;
 	unsigned int bs = i_blocksize(iter->inode);
+	struct iomap_writethrough_io_start *io_start;
 
 	/* copied over based on DIO handles these flags */
 	if (iter->iomap.type == IOMAP_UNWRITTEN)
@@ -1298,6 +1523,10 @@ static int iomap_writethrough_iter(struct iomap_writethrough_ctx *wt_ctx,
 			wt_ctx->use_fua = false;
 	}
 
+	io_start = iomap_writethrough_alloc_io_start(wt_ctx);
+	if (!io_start)
+		return -ENOMEM;
+
 	do {
 		struct folio *folio;
 		size_t offset;		/* Offset into folio */
@@ -1316,17 +1545,11 @@ retry:
 		if (unlikely(status))
 			break;
 
-		/*
-		 * If completions already occurred and reported errors, give up
-		 * now and don't bother submitting more bios.
-		 */
-		if (unlikely(data_race(wt_ctx->error))) {
-			wt_ctx->nr_bvecs = 0;
-			break;
-		}
-
 		if (bytes > iomap_length(iter))
 			bytes = iomap_length(iter);
+
+		if (iter->iomap.flags & IOMAP_F_SHARED)
+			io_start->flags |= IOSTART_F_SHARED;
 
 		/*
 		 * Bring in the user page that we'll copy from _first_.
@@ -1349,6 +1572,7 @@ retry:
 			iomap_write_failed(iter->inode, iter->pos, bytes);
 			break;
 		}
+
 		if (iter->iomap.flags & IOMAP_F_STALE)
 			break;
 
@@ -1356,6 +1580,18 @@ retry:
 
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_folio(folio);
+
+		/*
+		 * open coding stable write behavior here whiile taking care of
+		 * repeating folio. Check the comment on top for more info
+		 */
+		if (wt_ctx->prev_folio != folio) {
+			/*
+			 * pr_alert("%s: Waiting for writeback on folio %px\n",
+			 * 	 __func__, folio);
+			 */
+			folio_wait_writeback(folio);
+		}
 
 		copied = copy_folio_from_iter_atomic(folio, offset, bytes, i);
 		written = iomap_write_end(iter, bytes, copied, folio) ?
@@ -1368,21 +1604,31 @@ retry:
 		len_aligned = round_up(offset + written, bs) - off_aligned;
 
 		iomap_folio_prepare_writethrough(folio, off_aligned,
-						 len_aligned);
+						 len_aligned,
+						 wt_ctx->prev_folio == folio);
 
-		if (!wt_ctx->nr_bvecs)
-			wt_ctx->bio_pos = round_down(pos, bs);
+		wt_ctx->prev_folio = folio;
 
-		bvec_set_folio(&wt_ctx->bvec[wt_ctx->nr_bvecs], folio,
-			       len_aligned, off_aligned);
-		wt_ctx->nr_bvecs++;
-		wt_ctx->written += written;
+		if (!io_start->nr_bvecs) {
+			io_start->io_pos = round_down(pos, bs);
+			io_start->sector =
+				iomap_sector(&iter->iomap, io_start->io_pos);
+			io_start->bdev = iter->iomap.bdev;
+		}
+
+		io_start->fl[io_start->nr_bvecs].folio = folio;
+		io_start->fl[io_start->nr_bvecs].off_aligned = off_aligned;
+		io_start->fl[io_start->nr_bvecs].len_aligned = len_aligned;
+		io_start->nr_bvecs++;
 
 		if (pos + written > wt_ctx->new_i_size)
 			wt_ctx->new_i_size = pos + written;
 
-		if (wt_ctx->nr_bvecs == wt_ctx->max_bvecs)
-			iomap_writethrough_submit_bio(wt_ctx, &iter->iomap, wt_ops);
+		if (io_start->nr_bvecs == wt_ctx->max_bvecs) {
+			iomap_writethrough_add_io_start(wt_ctx, io_start);
+			io_start = iomap_writethrough_alloc_io_start(wt_ctx);
+			BUG_ON(!io_start);
+		}
 
 put_folio:
 		__iomap_put_folio(iter, wt_ops->write_ops, written, folio);
@@ -1400,12 +1646,19 @@ put_folio:
 			}
 		} else {
 			total_written += written;
+			wt_ctx->written += written;
 			iomap_iter_advance(iter, written);
 		}
 	} while (iov_iter_count(i) && iomap_length(iter));
 
-	if (wt_ctx->nr_bvecs)
-		iomap_writethrough_submit_bio(wt_ctx, &iter->iomap, wt_ops);
+	/*
+	 * Add final io_start to list if it has any bvecs.
+	 */
+	if (io_start && io_start->nr_bvecs > 0) {
+		iomap_writethrough_add_io_start(wt_ctx, io_start);
+	} else if (io_start) {
+		kfree(io_start);
+	}
 
 	return total_written ? 0 : status;
 }
@@ -1546,9 +1799,11 @@ iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *i,
 }
 EXPORT_SYMBOL_GPL(iomap_file_buffered_write);
 
-ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
-				      const struct iomap_writethrough_ops *wt_ops,
-				      void *private)
+ssize_t
+iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
+			      struct iomap_writethrough_ctx *wt_ctx,
+			      const struct iomap_writethrough_ops *wt_ops,
+			      void *private)
 {
 	struct inode *inode = iocb->ki_filp->f_mapping->host;
 	struct iomap_iter iter = {
@@ -1558,8 +1813,6 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 		.flags		= IOMAP_WRITE | IOMAP_WRITETHROUGH,
 		.private	= private,
 	};
-	struct iomap_writethrough_ctx *wt_ctx;
-	unsigned int max_bvecs;
 	ssize_t ret;
 
 
@@ -1571,30 +1824,14 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 	if (iocb->ki_flags & (IOCB_NOWAIT | IOCB_DONTCACHE))
 		return -EINVAL;
 
-	/*
-	 * +1 to max bvecs to account for unaligned write spanning multiple
-	 * folios
-	 */
-	max_bvecs = DIV_ROUND_UP(
-		iov_iter_count(i),
-		PAGE_SIZE << mapping_min_folio_order(inode->i_mapping)) + 1;
-
-	if (max_bvecs > BIO_MAX_VECS)
-		max_bvecs = BIO_MAX_VECS;
-	if (!max_bvecs)
-		max_bvecs = 1;
-
-	wt_ctx = kzalloc(struct_size(wt_ctx, bvec, max_bvecs), GFP_NOFS);
-	if (!wt_ctx)
-		return -ENOMEM;
-
 	wt_ctx->iocb = iocb;
 	wt_ctx->inode = inode;
 	wt_ctx->dops = wt_ops->dops;
 	wt_ctx->pos = iocb->ki_pos;
 	wt_ctx->new_i_size = i_size_read(inode);
-	wt_ctx->max_bvecs = max_bvecs;
 	wt_ctx->is_aio = !is_sync_kiocb(iocb);
+	wt_ctx->nr_io_starts = 0;
+	wt_ctx->prev_folio = NULL;
 	atomic_set(&wt_ctx->ref, 1);
 
 	/*
@@ -1606,15 +1843,17 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 
 	if (!wt_ctx->is_aio)
 		wt_ctx->waiter = current;
-	else
-		/*
-		 * With aio, writethrough can be in progress even after dropping
-		 * inode and folio lock. Due to this, we need a way to
-		 * synchronise with other paths where stable write is not enough
-		 * (example truncate). Hence use the dio begin/end as it gives
-		 * us the required guarantees.
-		 */
-		inode_dio_begin(inode);
+
+	/*
+	 * With the batched writethrough flow we submit the IO after dropping inode
+	 * and folio lock. Due to this, we need a way to synchronise with other
+	 * paths where stable write is not enough (example truncate). Hence use
+	 * the dio begin/end as it gives us the required guarantees.
+	 */
+	/*
+	 * pr_alert("%s: Starting dio on inode %lld\n", __func__, inode->i_ino);
+	 */
+	inode_dio_begin(inode);
 
 	mapping_set_stable_writes(inode->i_mapping);
 
@@ -1633,22 +1872,13 @@ ssize_t iomap_file_writethrough_write(struct kiocb *iocb, struct iov_iter *i,
 		iter.status = iomap_writethrough_iter(wt_ctx, &iter, i, wt_ops);
 	}
 	if (ret < 0)
-		cmpxchg(&wt_ctx->error, 0, ret);
+		return ret;
 
-	if (!atomic_dec_and_test(&wt_ctx->ref)) {
-		if (wt_ctx->is_aio)
-			return -EIOCBQUEUED;
-
-		for (;;) {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			if (!READ_ONCE(wt_ctx->waiter))
-				break;
-			blk_io_schedule();
-		}
-		__set_current_state(TASK_RUNNING);
-	}
-
-	return iomap_writethrough_complete(wt_ctx);
+	/*
+	 * Return bytes written so far or error
+	 */
+	WARN_ON_ONCE(ret > 0);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(iomap_file_writethrough_write);
 

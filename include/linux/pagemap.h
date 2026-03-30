@@ -721,6 +721,12 @@ typedef unsigned int __bitwise fgf_t;
 
 #define FGP_WRITEBEGIN		(FGP_LOCK | FGP_WRITE | FGP_CREAT | FGP_STABLE)
 
+/*
+ * For writethrough, we open code FGP_STABLE behavior. Check the comment in
+ * iomap_writethrough_iter() for more information
+ */
+#define FGP_WRITETHROUGHBEGIN	(FGP_LOCK | FGP_WRITE | FGP_CREAT)
+
 static inline unsigned int filemap_get_order(size_t size)
 {
 	unsigned int shift = ilog2(size);
