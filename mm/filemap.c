@@ -1705,6 +1705,22 @@ void folio_end_writeback(struct folio *folio)
 EXPORT_SYMBOL(folio_end_writeback);
 
 /**
+ * folio_end_writeback - End writeback against a folio.
+ * @folio: The folio.
+ *
+ * The folio must actually be under writeback.
+ *
+ * Context: May be called from process or interrupt context.
+ */
+void folio_end_writeback_lightweight(struct folio *folio)
+{
+	VM_BUG_ON_FOLIO(!folio_test_writeback(folio), folio);
+	if (folio_xor_flags_has_waiters(folio, 1 << PG_writeback))
+		folio_wake_bit(folio, PG_writeback);
+}
+EXPORT_SYMBOL(folio_end_writeback_lightweight);
+
+/**
  * __folio_lock - Get a lock on the folio, assuming we need to sleep to get it.
  * @folio: The folio to lock
  */

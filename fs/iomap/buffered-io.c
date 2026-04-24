@@ -1102,6 +1102,29 @@ static bool iomap_write_end_inline(const struct iomap_iter *iter,
 	return true;
 }
 
+static bool __iomap_writethrough_end(struct inode *inode, loff_t pos, size_t len,
+               size_t copied, struct folio *folio)
+{
+       flush_dcache_folio(folio);
+
+       /*
+        * The blocks that were entirely written will now be uptodate, so we
+        * don't have to worry about a read_folio reading them and overwriting a
+        * partial write.  However, if we've encountered a short write and only
+        * partially written into a block, it will not be marked uptodate, so a
+        * read_folio might come in and destroy our partial write.
+        *
+        * Do the simplest thing and just treat any short write to a
+        * non-uptodate page as a zero-length write, and force the caller to
+        * redo the whole thing.
+        */
+       if (unlikely(copied < len && !folio_test_uptodate(folio)))
+               return false;
+       iomap_set_range_uptodate(folio, offset_in_folio(folio, pos), len);
+       return true;
+}
+
+
 /*
  * Returns true if all copied bytes have been written to the pagecache,
  * otherwise return false.
@@ -1123,7 +1146,10 @@ static bool iomap_write_end(struct iomap_iter *iter, size_t len, size_t copied,
 		return bh_written == copied;
 	}
 
-	return __iomap_write_end(iter->inode, pos, len, copied, folio);
+	if (iter->iomap.flags & IOMAP_WRITETHROUGH)
+		return __iomap_writethrough_end(iter->inode, pos, len, copied, folio);
+	else
+		return __iomap_write_end(iter->inode, pos, len, copied, folio);
 }
 
 static ssize_t iomap_writethrough_complete(struct iomap_writethrough_ctx *wt_ctx)
@@ -1148,7 +1174,7 @@ static ssize_t iomap_writethrough_complete(struct iomap_writethrough_ctx *wt_ctx
 			 * 	 __func__, folio);
 			 */
 			if (prev_folio != folio)
-				folio_end_writeback(folio);
+				folio_end_writeback_lightweight(folio);
 			prev_folio = folio;
 		}
 	}
@@ -1320,26 +1346,29 @@ static void iomap_folio_prepare_writethrough(struct folio *folio, size_t off,
 {
 	bool fully_written;
 	u64 zero = 0;
+	u64 tmp_off = off;
 
 	if (folio_mkclean(folio))
 		folio_mark_dirty(folio);
 
 	/*
-	 * We might either write through the complete folio or a partial folio
-	 * writethrough might result in all blocks becoming non-dirty, so we need to
-	 * check and mark the folio clean if that is the case.
+	 * For writethrough, we don't mark the write range dirty but we still
+	 * need clear the dirty range if someone else has dirtied it before.
+	 * Further, if the clearing results in folio becoming completely clean,
+	 * then we need to take care of accounting.
 	 */
-	fully_written = (off == 0 && len == folio_size(folio));
-	iomap_clear_range_dirty(folio, off, len);
-	if (fully_written ||
-	    !iomap_find_dirty_range(folio, &zero, folio_size(folio)))
-		folio_clear_dirty_for_writethrough(folio);
+	if (iomap_find_dirty_range(folio, &tmp_off, tmp_off + len)) {
+		iomap_clear_range_dirty(folio, off, len);
+
+		if (!iomap_find_dirty_range(folio, &zero, folio_size(folio)))
+			folio_clear_dirty_for_writethrough(folio);
+	}
 
 	if (!already_prepared) {
 		/*
 		 * pr_alert("%s: Starting writeback on folio %px\n", __func__, folio);
 		 */
-		folio_start_writeback(folio);
+		folio_test_set_writeback(folio);
 	}
 }
 
@@ -1414,7 +1443,7 @@ void iomap_file_writethrough_cancel(struct kiocb *iocb,
 			 * 	 __func__, folio);
 			 */
 			if (prev_folio != folio)
-				folio_end_writeback(folio);
+				folio_end_writeback_lightweight(folio);
 			prev_folio = folio;
 		}
 		list_del(&io_start->io_start_node);
