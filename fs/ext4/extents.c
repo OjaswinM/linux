@@ -3542,6 +3542,166 @@ out_orig_err:
 }
 
 /*
+ * Return the path to the new extent if merge was successful, else retunr NULL.
+ */
+static struct ext4_ext_path *
+ext4_ext_split_fast_merge(handle_t *handle, struct inode *inode,
+			  struct ext4_map_blocks *map,
+			  struct ext4_ext_path *path, int flags)
+{
+	struct ext4_extent_header *eh;
+	ext4_lblk_t ee_block;
+	struct ext4_extent *ex, *abut_ex;
+	unsigned int ee_len, depth, map_len = map->m_len;
+	int err = 0;
+
+	depth = ext_depth(inode);
+	eh = path[depth].p_hdr;
+	ex = path[depth].p_ext;
+	ee_block = le32_to_cpu(ex->ee_block);
+	ee_len = ext4_ext_get_actual_len(ex);
+
+	/* This should never happen */
+	if (WARN_ON(!in_range(map->m_lblk, ee_block, ee_len)))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * For now we only support fast merge for unwritten to written.
+	 * conversions. Return NULL so caller can try some way to split extents.
+	 * Same when the caller doesn't want any merges.
+	 */
+	if (WARN_ON(!ext4_ext_is_unwritten(ex)) ||
+	    flags & EXT4_GET_BLOCKS_SPLIT_NOMERGE)
+		return NULL;
+	/*
+	 * Attempt to transfer newly initialized blocks from the currently
+	 * unwritten extent to its neighbor. This is much cheaper
+	 * than an insertion followed by a merge as those involve costly
+	 * memmove() calls. Transferring to the left is the common case in
+	 * steady state for workloads doing fallocate(FALLOC_FL_KEEP_SIZE)
+	 * followed by append writes.
+	 *
+	 * Limitations of the current logic:
+	 *  - L1: we do not deal with writes covering the whole extent.
+	 *    This would require removing the extent if the transfer
+	 *    is possible.
+	 *  - L2: we only attempt to merge with an extent stored in the
+	 *    same extent tree node.
+	 */
+
+	/* L2 */
+	if (ee_block == map->m_lblk && ee_len <= map_len)
+		return NULL;
+
+	if ((map->m_lblk == ee_block) &&
+		/* See if we can merge left */
+		(ex > EXT_FIRST_EXTENT(eh))) {	/*L2*/
+		ext4_lblk_t prev_lblk;
+		ext4_fsblk_t prev_pblk, ee_pblk;
+		unsigned int prev_len;
+
+		abut_ex = ex - 1;
+		prev_lblk = le32_to_cpu(abut_ex->ee_block);
+		prev_len = ext4_ext_get_actual_len(abut_ex);
+		prev_pblk = ext4_ext_pblock(abut_ex);
+		ee_pblk = ext4_ext_pblock(ex);
+
+		/*
+		 * A transfer of blocks from 'ex' to 'abut_ex' is allowed
+		 * upon those conditions:
+		 * - C1: abut_ex is initialized,
+		 * - C2: abut_ex is logically abutting ex,
+		 * - C3: abut_ex is physically abutting ex,
+		 * - C4: abut_ex can receive the additional blocks without
+		 *   overflowing the (initialized) length limit.
+		 */
+		if ((!ext4_ext_is_unwritten(abut_ex)) &&		/*C1*/
+			((prev_lblk + prev_len) == ee_block) &&		/*C2*/
+			((prev_pblk + prev_len) == ee_pblk) &&		/*C3*/
+			(prev_len < (EXT_INIT_MAX_LEN - map_len))) {	/*C4*/
+			err = ext4_ext_get_access(handle, inode, path + depth);
+			if (err)
+				goto err;
+
+			trace_ext4_ext_convert_to_initialized_fastpath(inode,
+				map, ex, abut_ex);
+
+			/* Shift the start of ex by 'map_len' blocks */
+			ex->ee_block = cpu_to_le32(ee_block + map_len);
+			ext4_ext_store_pblock(ex, ee_pblk + map_len);
+			ex->ee_len = cpu_to_le16(ee_len - map_len);
+			ext4_ext_mark_unwritten(ex); /* Restore the flag */
+
+			/* Extend abut_ex by 'map_len' blocks */
+			abut_ex->ee_len = cpu_to_le16(prev_len + map_len);
+
+			goto success;
+		}
+	} else if (((map->m_lblk + map_len) == (ee_block + ee_len)) &&
+		   ex < EXT_LAST_EXTENT(eh)) {	/*L2*/
+		/* See if we can merge right */
+		ext4_lblk_t next_lblk;
+		ext4_fsblk_t next_pblk, ee_pblk;
+		unsigned int next_len;
+
+		abut_ex = ex + 1;
+		next_lblk = le32_to_cpu(abut_ex->ee_block);
+		next_len = ext4_ext_get_actual_len(abut_ex);
+		next_pblk = ext4_ext_pblock(abut_ex);
+		ee_pblk = ext4_ext_pblock(ex);
+
+		/*
+		 * A transfer of blocks from 'ex' to 'abut_ex' is allowed
+		 * upon those conditions:
+		 * - C1: abut_ex is initialized,
+		 * - C2: abut_ex is logically abutting ex,
+		 * - C3: abut_ex is physically abutting ex,
+		 * - C4: abut_ex can receive the additional blocks without
+		 *   overflowing the (initialized) length limit.
+		 */
+		if ((!ext4_ext_is_unwritten(abut_ex)) &&		/*C1*/
+		    ((map->m_lblk + map_len) == next_lblk) &&		/*C2*/
+		    ((ee_pblk + ee_len) == next_pblk) &&		/*C3*/
+		    (next_len < (EXT_INIT_MAX_LEN - map_len))) {	/*C4*/
+			err = ext4_ext_get_access(handle, inode, path + depth);
+			if (err)
+				goto err;
+
+			trace_ext4_ext_convert_to_initialized_fastpath(inode,
+				map, ex, abut_ex);
+
+			/* Shift the start of abut_ex by 'map_len' blocks */
+			abut_ex->ee_block = cpu_to_le32(next_lblk - map_len);
+			ext4_ext_store_pblock(abut_ex, next_pblk - map_len);
+			ex->ee_len = cpu_to_le16(ee_len - map_len);
+			ext4_ext_mark_unwritten(ex); /* Restore the flag */
+
+			/* Extend abut_ex by 'map_len' blocks */
+			abut_ex->ee_len = cpu_to_le16(next_len + map_len);
+
+			goto success;
+		}
+	}
+	/* We couldn't merge */
+	return NULL;
+
+success:
+	/* Mark the block containing both extents as dirty */
+	err = ext4_ext_dirty(handle, inode, path + depth);
+	if (err)
+		goto err;
+
+	/* Update path to point to the right extent */
+	path[depth].p_ext = abut_ex;
+
+	return path;
+
+err:
+	ext4_free_ext_path(path);
+	return ERR_PTR(err);
+}
+
+/*
  * This function is called by ext4_ext_map_blocks() if someone tries to write
  * to an unwritten extent. It may result in splitting the unwritten
  * extent into multiple extents (up to three - one initialized and two
@@ -3570,11 +3730,12 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 	struct ext4_extent_header *eh;
 	struct ext4_map_blocks split_map;
 	struct ext4_extent zero_ex1, zero_ex2;
-	struct ext4_extent *ex, *abut_ex;
+	struct ext4_extent *ex;
 	ext4_lblk_t ee_block, eof_block;
 	unsigned int ee_len, depth, map_len = map->m_len;
 	int err = 0;
 	unsigned int max_zeroout = 0;
+	struct ext4_ext_path *orig_path = path;
 
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
 		  (unsigned long long)map->m_lblk, map_len);
@@ -3595,130 +3756,18 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 
 	trace_ext4_ext_convert_to_initialized_enter(inode, map, ex);
 
-	/* Pre-conditions */
-	BUG_ON(!ext4_ext_is_unwritten(ex));
-	BUG_ON(!in_range(map->m_lblk, ee_block, ee_len));
-
-	/*
-	 * Attempt to transfer newly initialized blocks from the currently
-	 * unwritten extent to its neighbor. This is much cheaper
-	 * than an insertion followed by a merge as those involve costly
-	 * memmove() calls. Transferring to the left is the common case in
-	 * steady state for workloads doing fallocate(FALLOC_FL_KEEP_SIZE)
-	 * followed by append writes.
-	 *
-	 * Limitations of the current logic:
-	 *  - L1: we do not deal with writes covering the whole extent.
-	 *    This would require removing the extent if the transfer
-	 *    is possible.
-	 *  - L2: we only attempt to merge with an extent stored in the
-	 *    same extent tree node.
-	 */
-	*allocated = 0;
-	if ((map->m_lblk == ee_block) &&
-		/* See if we can merge left */
-		(map_len < ee_len) &&		/*L1*/
-		(ex > EXT_FIRST_EXTENT(eh))) {	/*L2*/
-		ext4_lblk_t prev_lblk;
-		ext4_fsblk_t prev_pblk, ee_pblk;
-		unsigned int prev_len;
-
-		abut_ex = ex - 1;
-		prev_lblk = le32_to_cpu(abut_ex->ee_block);
-		prev_len = ext4_ext_get_actual_len(abut_ex);
-		prev_pblk = ext4_ext_pblock(abut_ex);
-		ee_pblk = ext4_ext_pblock(ex);
-
-		/*
-		 * A transfer of blocks from 'ex' to 'abut_ex' is allowed
-		 * upon those conditions:
-		 * - C1: abut_ex is initialized,
-		 * - C2: abut_ex is logically abutting ex,
-		 * - C3: abut_ex is physically abutting ex,
-		 * - C4: abut_ex can receive the additional blocks without
-		 *   overflowing the (initialized) length limit.
-		 */
-		if ((!ext4_ext_is_unwritten(abut_ex)) &&		/*C1*/
-			((prev_lblk + prev_len) == ee_block) &&		/*C2*/
-			((prev_pblk + prev_len) == ee_pblk) &&		/*C3*/
-			(prev_len < (EXT_INIT_MAX_LEN - map_len))) {	/*C4*/
-			err = ext4_ext_get_access(handle, inode, path + depth);
-			if (err)
-				goto errout;
-
-			trace_ext4_ext_convert_to_initialized_fastpath(inode,
-				map, ex, abut_ex);
-
-			/* Shift the start of ex by 'map_len' blocks */
-			ex->ee_block = cpu_to_le32(ee_block + map_len);
-			ext4_ext_store_pblock(ex, ee_pblk + map_len);
-			ex->ee_len = cpu_to_le16(ee_len - map_len);
-			ext4_ext_mark_unwritten(ex); /* Restore the flag */
-
-			/* Extend abut_ex by 'map_len' blocks */
-			abut_ex->ee_len = cpu_to_le16(prev_len + map_len);
-
-			/* Result: number of initialized blocks past m_lblk */
-			*allocated = map_len;
-		}
-	} else if (((map->m_lblk + map_len) == (ee_block + ee_len)) &&
-		   (map_len < ee_len) &&	/*L1*/
-		   ex < EXT_LAST_EXTENT(eh)) {	/*L2*/
-		/* See if we can merge right */
-		ext4_lblk_t next_lblk;
-		ext4_fsblk_t next_pblk, ee_pblk;
-		unsigned int next_len;
-
-		abut_ex = ex + 1;
-		next_lblk = le32_to_cpu(abut_ex->ee_block);
-		next_len = ext4_ext_get_actual_len(abut_ex);
-		next_pblk = ext4_ext_pblock(abut_ex);
-		ee_pblk = ext4_ext_pblock(ex);
-
-		/*
-		 * A transfer of blocks from 'ex' to 'abut_ex' is allowed
-		 * upon those conditions:
-		 * - C1: abut_ex is initialized,
-		 * - C2: abut_ex is logically abutting ex,
-		 * - C3: abut_ex is physically abutting ex,
-		 * - C4: abut_ex can receive the additional blocks without
-		 *   overflowing the (initialized) length limit.
-		 */
-		if ((!ext4_ext_is_unwritten(abut_ex)) &&		/*C1*/
-		    ((map->m_lblk + map_len) == next_lblk) &&		/*C2*/
-		    ((ee_pblk + ee_len) == next_pblk) &&		/*C3*/
-		    (next_len < (EXT_INIT_MAX_LEN - map_len))) {	/*C4*/
-			err = ext4_ext_get_access(handle, inode, path + depth);
-			if (err)
-				goto errout;
-
-			trace_ext4_ext_convert_to_initialized_fastpath(inode,
-				map, ex, abut_ex);
-
-			/* Shift the start of abut_ex by 'map_len' blocks */
-			abut_ex->ee_block = cpu_to_le32(next_lblk - map_len);
-			ext4_ext_store_pblock(abut_ex, next_pblk - map_len);
-			ex->ee_len = cpu_to_le16(ee_len - map_len);
-			ext4_ext_mark_unwritten(ex); /* Restore the flag */
-
-			/* Extend abut_ex by 'map_len' blocks */
-			abut_ex->ee_len = cpu_to_le16(next_len + map_len);
-
-			/* Result: number of initialized blocks past m_lblk */
-			*allocated = map_len;
-		}
+	path = ext4_ext_split_fast_merge(handle, inode, map, path, flags);
+	if (IS_ERR(path))
+		return path;
+	if (path) {
+		/* We were able to merge into a neighboring extend */
+		*allocated = map_len;
+		return path;
 	}
-	if (*allocated) {
-		/* Mark the block containing both extents as dirty */
-		err = ext4_ext_dirty(handle, inode, path + depth);
 
-		/* Update path to point to the right extent */
-		path[depth].p_ext = abut_ex;
-		if (err)
-			goto errout;
-		goto out;
-	} else
-		*allocated = ee_len - (map->m_lblk - ee_block);
+	path = orig_path;
+
+	*allocated = ee_len - (map->m_lblk - ee_block);
 
 	WARN_ON(map->m_lblk < ee_block);
 	/*
@@ -3784,15 +3833,12 @@ fallback:
 					  flags | EXT4_GET_BLOCKS_CONVERT, NULL);
 	if (IS_ERR(path))
 		return path;
-out:
+
 	/* If we have gotten a failure, don't zero out status tree */
 	ext4_zeroout_es(inode, &zero_ex1);
 	ext4_zeroout_es(inode, &zero_ex2);
 	return path;
 
-errout:
-	ext4_free_ext_path(path);
-	return ERR_PTR(err);
 }
 
 /*
