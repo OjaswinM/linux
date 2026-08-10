@@ -3313,7 +3313,8 @@ out_path:
 
 static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 				     struct ext4_ext_path *path,
-				     struct ext4_map_blocks *map, int flags)
+				     struct ext4_map_blocks *map, int flags,
+				     uint32_t max_zeroout)
 {
 	struct ext4_extent *ex;
 	unsigned int ee_len, depth;
@@ -3346,6 +3347,10 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 		if (map->m_lblk > ee_block) {
 			lblk = ee_block;
 			len = map->m_lblk - ee_block;
+
+			if (len > max_zeroout)
+				return -EFBIG;
+
 			pblk = ext4_ext_pblock(ex);
 			err = ext4_issue_zeroout(inode, lblk, pblk, len);
 			if (err)
@@ -3357,6 +3362,10 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 		if (map_end < ex_end) {
 			lblk = map_end;
 			len = ex_end - map_end;
+
+			if (len > max_zeroout)
+				return -EFBIG;
+
 			pblk = ext4_ext_pblock(ex) + (map_end - ee_block);
 			err = ext4_issue_zeroout(inode, lblk, pblk, len);
 			if (err)
@@ -3376,6 +3385,10 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 
 		lblk = map->m_lblk;
 		len = map->m_len;
+
+		if (len > max_zeroout)
+			return -EFBIG;
+
 		pblk = ext4_ext_pblock(ex) + (map->m_lblk - ee_block);
 		err = ext4_issue_zeroout(inode, lblk, pblk, len);
 		if (err)
@@ -3517,7 +3530,12 @@ try_zeroout:
 		    unwritten != orig_unwritten))
 		goto out_free_path;
 
-	if (ext4_split_extent_zeroout(handle, inode, path, map, flags))
+	/*
+	 * We pass max_zeroout=UINT_MAX cause we can be in endio scenarios and
+	 * we really want this to pass
+	 */
+	if (ext4_split_extent_zeroout(handle, inode, path, map, flags,
+				      UINT_MAX))
 		goto out_free_path;
 
 	/* zeroout succeeded */
