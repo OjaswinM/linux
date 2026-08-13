@@ -148,6 +148,16 @@ static struct kunit_ext_state kunit_ext_single_unwrit_big[] = {
 	{ }
 };
 
+static struct kunit_ext_state kunit_ext_single_writ_big[] = {
+	{
+		.ex_lblk = EXT_DATA_LBLK,
+		.ex_len = EXT_DATA_LEN_BIG,
+		.ex_pblk = EXT_DATA_PBLK,
+		.is_unwrit = false,
+	},
+	{ }
+};
+
 static struct kunit_ext_state kunit_ext_single_writ[] = {
 	{
 		.ex_lblk = EXT_DATA_LBLK,
@@ -333,22 +343,14 @@ static void extents_kunit_tune(struct kunit *test) {
 		(struct kunit_ext_test_param *)(test->param_value);
 	struct ext4_sb_info *sbi = k_ctx.k_ei->vfs_inode.i_sb->s_fs_info;
 
-	if (param->subtype == TEST_ZEROOUT_FALLBACK) {
+	if (param->subtype == TEST_ZEROOUT_FALLBACK)
 		/*
 		 * Force zeroout fallback by making ext4_ext_insert_extent
 		 * return ENOSPC
 		 */
 		kunit_activate_static_stub(test, ext4_ext_insert_extent,
 					   ext4_ext_insert_extent_stub);
-
-		/*
-		 * To test zeroout fallback for written to unwritten conversion,
-		 * s_extent_max_zeroout_kb must be set. See ext4_split_extent_at().
-		 */
-		if (param->type == TEST_WRIT_TO_UNWRIT)
-			sbi->s_extent_max_zeroout_kb = 32;
-
-	} else if (param->subtype == TEST_PREEMPTIVE_ZEROOUT)
+	else if (param->subtype == TEST_PREEMPTIVE_ZEROOUT)
 		sbi->s_extent_max_zeroout_kb = 32;
 
 }
@@ -729,10 +731,10 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			       .ex_len = 1,
 			       .is_unwrit = 0 } } },
 
-	/* writ to unwrit splits (zeroout) */
-	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit (zeroout)",
+	/* writ to unwrit splits (preemptive zeroout) */
+	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit (preemptive zeroout)",
 	  .type = TEST_WRIT_TO_UNWRIT,
-	  .subtype = TEST_ZEROOUT_FALLBACK,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
 	  .init_state = kunit_ext_single_writ,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -745,9 +747,9 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			      { .exp_char = 'X',
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit (zeroout)",
+	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit (preemptive zeroout)",
 	  .type = TEST_WRIT_TO_UNWRIT,
-	  .subtype = TEST_ZEROOUT_FALLBACK,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
 	  .init_state = kunit_ext_single_writ,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -760,9 +762,9 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			      { .exp_char = 0,
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split writ extent to 2 and convert 2nd half unwrit - range extends beyond extent (zeroout)",
+	{ .desc = "split writ extent to 2 and convert 2nd half unwrit - range extends beyond extent (preemptive zeroout)",
 	  .type = TEST_WRIT_TO_UNWRIT,
-	  .subtype = TEST_ZEROOUT_FALLBACK,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
 	  .init_state = kunit_ext_single_writ,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN  },
@@ -775,9 +777,9 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			      { .exp_char = 0,
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split writ extent to 3 extents and convert 2nd half unwrit (zeroout)",
+	{ .desc = "split writ extent to 3 extents and convert 2nd half unwrit (preemptive zeroout)",
 	  .type = TEST_WRIT_TO_UNWRIT,
-	  .subtype = TEST_ZEROOUT_FALLBACK,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
 	  .init_state = kunit_ext_single_writ,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -793,6 +795,28 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			      { .exp_char = 'X',
 				.off_blk = EXT_DATA_LEN - 1,
 				.len_blk = 1 } } },
+	{ .desc = "split writ to uwrit - ensure preemptive zeroout respects max zeroout limit",
+	  .type = TEST_WRIT_TO_UNWRIT,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_writ_big,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1,
+			 .m_len = 9 },
+	  .nr_exp_ext = 3,
+
+	  /*
+	   * Zeroout should fail because we crossed the zerrout limit on the
+	   * left half and we should fall back to splitting
+	   */
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = 1,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + 1,
+			       .ex_len = 9,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK + 10,
+			       .ex_len = EXT_DATA_LEN_BIG - 10,
+			       .is_unwrit = 0 } } },
 };
 
 /* Tests to trigger ext4_ext_map_blocks() -> ext4_ext_handle_unwritten_exntents() */
@@ -863,6 +887,137 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			     { .ex_lblk = EXT_DATA_LBLK + 1 + (EXT_DATA_LEN - 2),
 			       .ex_len = 1,
 			       .is_unwrit = 1 } } },
+
+	/*
+	 * unwrit to writ splits via endio path with preemptive zeroout optimisation
+	 */
+	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (endio, preemptive zeroout)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
+	  .nr_exp_ext = 1,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 } },
+	  .nr_exp_data_segs = 2,
+	  .exp_data_state = { { .exp_char = 'X', .off_blk = 0, .len_blk = 1 },
+			      { .exp_char = 0,
+				.off_blk = 1,
+				.len_blk = EXT_DATA_LEN - 1 } } },
+	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (endio, preemptive zeroout)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
+	  .nr_exp_ext = 1,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 } },
+	  .nr_exp_data_segs = 2,
+	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
+			      { .exp_char = 'X',
+				.off_blk = 1,
+				.len_blk = EXT_DATA_LEN - 1 } } },
+	{ .desc = "split unwrit extent to 2 and convert 2nd half writ - range extends beyond extent (endio, preemptive zeroout)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN },
+	  .nr_exp_ext = 1,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 } },
+	  .nr_exp_data_segs = 2,
+	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
+			      { .exp_char = 'X',
+				.off_blk = 1,
+				.len_blk = EXT_DATA_LEN - 1 } } },
+	{ .desc = "split unwrit extent to 3 extents and convert 2nd half writ (endio, preemptive zeroout)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
+	  .nr_exp_ext = 1,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 } },
+	  .nr_exp_data_segs = 3,
+	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
+			      { .exp_char = 'X',
+				.off_blk = 1,
+				.len_blk = EXT_DATA_LEN - 2 },
+			      { .exp_char = 0,
+				.off_blk = EXT_DATA_LEN - 1,
+				.len_blk = 1 } } },
+	{ .desc = "split unwrit to writ - ensure no zeroout beyong i_disksize (non-endio)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit_abuts_eof,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_EOF_LBLK - 1,
+			 .m_len = 2},
+
+	  /*
+	   * Zeroout should fail because we crossed eof and we should fall back
+	   * to splitting
+	   */
+	  .nr_exp_ext = 3,
+	  .exp_ext_state = { { .ex_lblk = EXT_EOF_LBLK - 2,
+			       .ex_len = 1,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_EOF_LBLK - 1,
+			       .ex_len = 2,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_EOF_LBLK + 1,
+			       .ex_len = 1,
+			       .is_unwrit = 1 } } },
+	{ .desc = "split unwrit to writ - ensure preemptive zeroout respects max zeroout limit (non-endio)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit_big,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 9,
+			 .m_len = EXT_DATA_LEN_BIG - 9 - 2 },
+	  .nr_exp_ext = 3,
+
+	  /*
+	   * Zeroout should fail because we crossed the zerrout limit on the
+	   * left half and we should fall back to splitting
+	   */
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = 9,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK + 9,
+			       .ex_len = EXT_DATA_LEN_BIG - 9 - 2,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + 9 + (EXT_DATA_LEN_BIG - 9 - 2),
+			       .ex_len = 2,
+			       .is_unwrit = 1 } } },
+	{ .desc = "split unwrit to writ - ensure preemptive zeroout respects max zeroout limit - 2 (non-endio)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_PREEMPTIVE_ZEROOUT,
+	  .init_state = kunit_ext_single_unwrit_big,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + 2,
+			 .m_len = EXT_DATA_LEN_BIG - 9 - 2 },
+
+	  /*
+	   * Zeroout should fail because we crossed the zerrout limit on the
+	   * right half however we should still be zeroing the left half.
+	   */
+	  .nr_exp_ext = 2,
+	  .exp_ext_state = {{ .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN_BIG - 9,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN_BIG - 9,
+			       .ex_len = 9,
+			       .is_unwrit = 1 } } },
+
 
 	/* unwrit to writ splits via non-endio path */
 	{ .desc = "convert unwrit extent to writ (non endio)",

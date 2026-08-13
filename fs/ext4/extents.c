@@ -3327,6 +3327,7 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 	uint64_t lblk, pblk, len;
 	int is_unwrit;
 	int err = 0;
+	loff_t map_end, ex_end;
 
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
@@ -3334,15 +3335,39 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 	ee_len = ext4_ext_get_actual_len(ex);
 	is_unwrit = ext4_ext_is_unwritten(ex);
 
+
+	map_end = (loff_t) map->m_lblk + map->m_len;
+	ex_end = (loff_t) ee_block + ee_len;
+
+	/*
+	 * zeroout is only possible if we don't have range in the extent that is
+	 * pending conversion (ie IO is complete and endio conversion is
+	 * remaining) This is so that we don't accidentally zeroout a valid data
+	 * range we have not yet converted.
+	 */
+	/* Check left side */
+	lblk = ee_block;
+	len = map->m_lblk - ee_block;
+	if (len && ext4_es_scan_range(inode, &ext4_es_is_convert_pending, lblk,
+				      lblk + len - 1))
+		return -EINVAL;
+
+	/* Check right side */
+	lblk = map_end;
+	len = ex_end - map_end;
+	if (len && ext4_es_scan_range(inode, &ext4_es_is_convert_pending, lblk,
+				      lblk + len - 1))
+		return -EINVAL;
+
+	lblk = 0;
+	len = 0;
+
 	if (flags & EXT4_GET_BLOCKS_CONVERT) {
 		/*
 		 * EXT4_GET_BLOCKS_CONVERT: Caller wants the range specified by
 		 * map to be initialized. Zeroout everything except the map
 		 * range.
 		 */
-
-		loff_t map_end = (loff_t) map->m_lblk + map->m_len;
-		loff_t ex_end = (loff_t) ee_block + ee_len;
 
 		if (!is_unwrit)
 			/* Shouldn't happen. Just exit */
@@ -3515,14 +3540,9 @@ try_zeroout:
 	if (!(split_flag & EXT4_EXT_MAY_ZEROOUT))
 		goto out_orig_err;
 
-	if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN) {
-		int max_zeroout_blks =
-			EXT4_SB(inode->i_sb)->s_extent_max_zeroout_kb >>
-			(inode->i_sb->s_blocksize_bits - 10);
-
-		if (map->m_len > max_zeroout_blks)
-			goto out_orig_err;
-	}
+	/* Converting written to unwritten is not a critical path so lets just exit */
+	if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN)
+		goto out_orig_err;
 
 	path = ext4_find_extent(inode, map->m_lblk, NULL, flags);
 	if (IS_ERR(path))
@@ -3759,7 +3779,6 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 	struct ext4_extent *ex;
 	ext4_lblk_t ee_block, eof_block;
 	unsigned int ee_len, depth, map_len = map->m_len;
-	int err = 0;
 	struct ext4_ext_path *orig_path = path;
 
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
@@ -3791,28 +3810,6 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 	path = orig_path;
 
 	*allocated = ee_len - (map->m_lblk - ee_block);
-
-	WARN_ON(map->m_lblk < ee_block);
-
-	/*
-	 * Try to zeroout the extent if possible, if not then we fallback to
-	 * actual splitting. It is safe to convert extent to initialized via
-	 * explicit zeroout only if extent is fully inside i_size or new_size.
-	 */
-	if (ee_block + ee_len <= eof_block) {
-		unsigned int max_zeroout = sbi->s_extent_max_zeroout_kb >>
-					   (inode->i_sb->s_blocksize_bits - 10);
-
-		err = ext4_split_extent_zeroout(handle, inode, path, &split_map,
-						flags | EXT4_GET_BLOCKS_CONVERT,
-						max_zeroout);
-		if (!err) {
-			ext4_es_insert_extent(inode, ee_block, ee_len,
-					ext4_ext_pblock(ex),
-					EXTENT_STATUS_WRITTEN, false);
-			return path;
-		}
-	}
 
 	path = ext4_split_convert_extents(handle, inode, &split_map, path,
 					  flags | EXT4_GET_BLOCKS_CONVERT, NULL);
@@ -3861,6 +3858,8 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	unsigned int ee_len;
 	int split_flag = 0, depth, err = 0;
 	bool did_zeroout = false;
+	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
+	struct ext4_map_blocks split_map = *map;
 
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
 		  (unsigned long long)map->m_lblk, map->m_len);
@@ -3884,11 +3883,21 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	 */
 	split_flag |= ee_block + ee_len <= eof_block ? EXT4_EXT_MAY_ZEROOUT : 0;
 
+	/* zeroout optimization */
+	if (split_flag & EXT4_EXT_MAY_ZEROOUT) {
+		int max_zeroout = sbi->s_extent_max_zeroout_kb >>
+				  (inode->i_sb->s_blocksize_bits - 10);
+		err = ext4_split_extent_zeroout(handle, inode, path, &split_map,
+						flags, max_zeroout);
+		if (!err)
+			goto es_update;
+	}
+
 	/*
 	 * pass SPLIT_NOMERGE explicitly so we don't end up merging extents we
 	 * just split.
 	 */
-	path = ext4_split_extent(handle, inode, path, map, split_flag,
+	path = ext4_split_extent(handle, inode, path, &split_map, split_flag,
 				 flags | EXT4_GET_BLOCKS_SPLIT_NOMERGE,
 				 allocated, &did_zeroout);
 	if (IS_ERR(path))
@@ -3928,6 +3937,7 @@ convert:
 	}
 
 	/* Lets update the extent status tree after conversion */
+es_update:
 	if (!(flags & EXT4_EX_NOCACHE))
 		ext4_es_insert_extent(inode, le32_to_cpu(ex->ee_block),
 				      ext4_ext_get_actual_len(ex),
