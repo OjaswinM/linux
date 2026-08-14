@@ -190,6 +190,28 @@ static struct kunit_ext_state kunit_ext_writ_unwrit_writ[] = {
 	{ }
 };
 
+static struct kunit_ext_state kunit_ext_unwrit_writ_unwrit[] = {
+	{
+		.ex_lblk = EXT_DATA_LBLK - EXT_DATA_LEN,
+		.ex_len = EXT_DATA_LEN,
+		.ex_pblk = EXT_DATA_PBLK - EXT_DATA_LEN,
+		.is_unwrit = true,
+	},
+	{
+		.ex_lblk = EXT_DATA_LBLK,
+		.ex_len = EXT_DATA_LEN,
+		.ex_pblk = EXT_DATA_PBLK,
+		.is_unwrit = false,
+	},
+	{
+		.ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN,
+		.ex_len = EXT_DATA_LEN,
+		.ex_pblk = EXT_DATA_PBLK + EXT_DATA_LEN,
+		.is_unwrit = true,
+	},
+	{ }
+};
+
 struct kunit_ext_test_param {
 	/* description of test */
 	char *desc;
@@ -817,6 +839,40 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			     { .ex_lblk = EXT_DATA_LBLK + 10,
 			       .ex_len = EXT_DATA_LEN_BIG - 10,
 			       .is_unwrit = 0 } } },
+
+	/* writ to unwrit splits with fast merge */
+	{ .desc = "split and convert writ extent to unwrit by fast merging left",
+	  .type = TEST_WRIT_TO_UNWRIT,
+	  .subtype = TEST_FAST_MERGE,
+	  .init_state = kunit_ext_unwrit_writ_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
+	  .nr_exp_ext = 3,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK - EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN + 1,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK + 1,
+			       .ex_len = EXT_DATA_LEN - 1,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 1 } } },
+	{ .desc = "split and convert writ extent to unwrit by fast merging right",
+	  .type = TEST_WRIT_TO_UNWRIT,
+	  .subtype = TEST_FAST_MERGE,
+	  .init_state = kunit_ext_unwrit_writ_unwrit,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + EXT_DATA_LEN - 1, .m_len = 1 },
+	  .nr_exp_ext = 3,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK - EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN - 1,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN - 1,
+			       .ex_len = EXT_DATA_LEN + 1,
+			       .is_unwrit = 1 } } },
 };
 
 /* Tests to trigger ext4_ext_map_blocks() -> ext4_ext_handle_unwritten_exntents() */
@@ -1018,6 +1074,41 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			       .ex_len = 9,
 			       .is_unwrit = 1 } } },
 
+	/*
+	 * unwrit to writ splits via endio path with fast merge optimisation
+	 */
+	{ .desc = "split and convert unwrit extent to writ by fast merging left (endio)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_FAST_MERGE,
+	  .init_state = kunit_ext_writ_unwrit_writ,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
+	  .nr_exp_ext = 3,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK - EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN + 1,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK + 1,
+			       .ex_len = EXT_DATA_LEN - 1,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 } } },
+	{ .desc = "split and convert unwrit extent to writ by fast merging right (endio)",
+	  .type = TEST_UNWRIT_TO_WRIT_ENDIO,
+	  .subtype = TEST_FAST_MERGE,
+	  .init_state = kunit_ext_writ_unwrit_writ,
+	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
+	  .split_map = { .m_lblk = EXT_DATA_LBLK + EXT_DATA_LEN - 1, .m_len = 1 },
+	  .nr_exp_ext = 3,
+	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK - EXT_DATA_LEN,
+			       .ex_len = EXT_DATA_LEN,
+			       .is_unwrit = 0 },
+			     { .ex_lblk = EXT_DATA_LBLK,
+			       .ex_len = EXT_DATA_LEN - 1,
+			       .is_unwrit = 1 },
+			     { .ex_lblk = EXT_DATA_LBLK + EXT_DATA_LEN - 1,
+			       .ex_len = EXT_DATA_LEN + 1,
+			       .is_unwrit = 0 } } },
 
 	/* unwrit to writ splits via non-endio path */
 	{ .desc = "convert unwrit extent to writ (non endio)",
