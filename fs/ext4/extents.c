@@ -6393,16 +6393,6 @@ int ext4_ext_space_root_idx_test(struct inode *inode, int check)
 }
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ext_space_root_idx_test);
 
-struct ext4_ext_path *ext4_split_convert_extents_test(handle_t *handle,
-			struct inode *inode, struct ext4_map_blocks *map,
-			struct ext4_ext_path *path, int flags,
-			unsigned int *allocated)
-{
-	return ext4_split_convert_extents(handle, inode, map, path,
-					  flags, allocated);
-}
-EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_split_convert_extents_test);
-
 EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_ext_dirty);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ext_zeroout);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_register_shrinker);

@@ -78,11 +78,6 @@ struct kunit_ext_data_state {
 	ext4_lblk_t len_blk;
 };
 
-enum kunit_test_types {
-	TEST_SPLIT_CONVERT,
-	TEST_CREATE_BLOCKS,
-};
-
 struct kunit_ext_test_param {
 	/* description of test */
 	char *desc;
@@ -424,24 +419,13 @@ static void test_split_convert(struct kunit *test)
 	map.m_lblk = param->split_map.m_lblk;
 	map.m_len = param->split_map.m_len;
 
-	switch (param->type) {
-	case TEST_SPLIT_CONVERT:
-		path = ext4_split_convert_extents_test(NULL, inode, &map,
-					path, param->split_flags, NULL);
-		break;
-	case TEST_CREATE_BLOCKS:
-		ext4_map_create_blocks_helper(test, inode, &map, param->split_flags);
-		break;
-	default:
-		KUNIT_FAIL(test, "param->type %d not support.", param->type);
-	}
+	ext4_map_create_blocks_helper(test, inode, &map, param->split_flags);
 
 	path = ext4_find_extent(inode, EXT_DATA_LBLK, NULL, EXT4_EX_NOCACHE);
 	ex = path->p_ext;
 
 	for (int i = 0; i < param->nr_exp_ext; i++) {
 		struct kunit_ext_state exp_ext = param->exp_ext_state[i];
-		bool es_check_needed = param->type != TEST_SPLIT_CONVERT;
 		struct extent_status es;
 		int contains_ex, ex_end, es_end, es_pblk;
 
@@ -459,25 +443,21 @@ static void test_split_convert(struct kunit *test)
 		 * Also, ext4_split_convert_extents() forces EXT4_EX_NOCACHE hence
 		 * es status are ignored for that case.
 		 */
-		if (es_check_needed) {
-			ext4_es_lookup_extent(inode, le32_to_cpu(ex->ee_block),
-					      NULL, &es, NULL);
+		ext4_es_lookup_extent(inode, le32_to_cpu(ex->ee_block), NULL,
+				      &es, NULL);
 
-			ex_end = exp_ext.ex_lblk + exp_ext.ex_len;
-			es_end = es.es_lblk + es.es_len;
-			contains_ex = es.es_lblk <= exp_ext.ex_lblk &&
-				      es_end >= ex_end;
-			es_pblk = ext4_es_pblock(&es) +
-				  (exp_ext.ex_lblk - es.es_lblk);
+		ex_end = exp_ext.ex_lblk + exp_ext.ex_len;
+		es_end = es.es_lblk + es.es_len;
+		contains_ex = es.es_lblk <= exp_ext.ex_lblk && es_end >= ex_end;
+		es_pblk = ext4_es_pblock(&es) + (exp_ext.ex_lblk - es.es_lblk);
 
-			KUNIT_EXPECT_EQ(test, contains_ex, 1);
-			KUNIT_EXPECT_EQ(test, ext4_ext_pblock(ex), es_pblk);
-			KUNIT_EXPECT_EQ(test, 1,
-					(exp_ext.is_unwrit &&
-					 ext4_es_is_unwritten(&es)) ||
-						(!exp_ext.is_unwrit &&
-						 ext4_es_is_written(&es)));
-		}
+		KUNIT_EXPECT_EQ(test, contains_ex, 1);
+		KUNIT_EXPECT_EQ(test, ext4_ext_pblock(ex), es_pblk);
+		KUNIT_EXPECT_EQ(test, 1,
+				(exp_ext.is_unwrit &&
+				 ext4_es_is_unwritten(&es)) ||
+					(!exp_ext.is_unwrit &&
+					 ext4_es_is_written(&es)));
 
 		/* Only printed on failure */
 		kunit_log(KERN_INFO, test,
@@ -488,12 +468,11 @@ static void test_split_convert(struct kunit *test)
 			  le32_to_cpu(ex->ee_block),
 			  ext4_ext_get_actual_len(ex),
 			  ext4_ext_is_unwritten(ex));
-		if (es_check_needed)
-			kunit_log(
-				KERN_INFO, test,
-				"# [extent %d] es: lblk:%d len:%d pblk:%lld type:0x%x\n",
-				i, es.es_lblk, es.es_len, ext4_es_pblock(&es),
-				ext4_es_type(&es));
+		kunit_log(
+			KERN_INFO, test,
+			"# [extent %d] es: lblk:%d len:%d pblk:%lld type:0x%x\n",
+			i, es.es_lblk, es.es_len, ext4_es_pblock(&es),
+			ext4_es_type(&es));
 		kunit_log(KERN_INFO, test, "------------------\n");
 
 		ex = ex + 1;
@@ -521,200 +500,10 @@ static void test_split_convert(struct kunit *test)
 	return;
 }
 
-static const struct kunit_ext_test_param test_split_convert_params[] = {
-	/* unwrit to writ splits */
-	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
-	  .nr_exp_ext = 2,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 0 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 1,
-			       .is_unwrit = 1 } },
-	  .is_zeroout_test = 0 },
-	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
-	  .nr_exp_ext = 2,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 1 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 1,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 0 },
-	{ .desc = "split unwrit extent to 3 extents and convert 2nd half to writ",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
-	  .nr_exp_ext = 3,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 1 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 2,
-			       .is_unwrit = 0 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1 + (EXT_DATA_LEN - 2),
-			       .ex_len = 1,
-			       .is_unwrit = 1 } },
-	  .is_zeroout_test = 0 },
-
-	/* writ to unwrit splits */
-	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
-	  .nr_exp_ext = 2,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 1 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 1,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 0 },
-	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
-	  .nr_exp_ext = 2,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 0 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 1,
-			       .is_unwrit = 1 } },
-	  .is_zeroout_test = 0 },
-	{ .desc = "split writ extent to 3 extents and convert 2nd half to unwrit",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
-	  .nr_exp_ext = 3,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = 1,
-			       .is_unwrit = 0 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1,
-			       .ex_len = EXT_DATA_LEN - 2,
-			       .is_unwrit = 1 },
-			     { .ex_lblk = EXT_DATA_LBLK + 1 + (EXT_DATA_LEN - 2),
-			       .ex_len = 1,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 0 },
-
-	/*
-	 * ***** zeroout tests *****
-	 */
-	/* unwrit to writ splits */
-	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 2,
-	  .exp_data_state = { { .exp_char = 'X', .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 0,
-				.off_blk = 1,
-				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 2,
-	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 'X',
-				.off_blk = 1,
-				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split unwrit extent to 3 extents and convert 2nd half writ (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 1,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 3,
-	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 'X', .off_blk = 1, .len_blk = EXT_DATA_LEN - 2 },
-			      { .exp_char = 0, .off_blk = EXT_DATA_LEN - 1, .len_blk = 1 } } },
-
-	/* writ to unwrit splits */
-	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 2,
-	  .exp_data_state = { { .exp_char = 0, .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 'X',
-				.off_blk = 1,
-				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 2,
-	  .exp_data_state = { { .exp_char = 'X', .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 0,
-				.off_blk = 1,
-				.len_blk = EXT_DATA_LEN - 1 } } },
-	{ .desc = "split writ extent to 3 extents and convert 2nd half unwrit (zeroout)",
-	  .type = TEST_SPLIT_CONVERT,
-	  .is_unwrit_at_start = 0,
-	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
-	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
-	  .nr_exp_ext = 1,
-	  .exp_ext_state = { { .ex_lblk = EXT_DATA_LBLK,
-			       .ex_len = EXT_DATA_LEN,
-			       .is_unwrit = 0 } },
-	  .is_zeroout_test = 1,
-	  .nr_exp_data_segs = 3,
-	  .exp_data_state = { { .exp_char = 'X', .off_blk = 0, .len_blk = 1 },
-			      { .exp_char = 0,
-				.off_blk = 1,
-				.len_blk = EXT_DATA_LEN - 2 },
-			      { .exp_char = 'X',
-				.off_blk = EXT_DATA_LEN - 1,
-				.len_blk = 1 } } },
-};
-
 /* Tests to trigger ext4_ext_map_blocks() -> convert_initialized_extent() */
 static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 	/* writ to unwrit splits */
 	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit",
-	  .type = TEST_CREATE_BLOCKS,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .is_unwrit_at_start = 0,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -727,7 +516,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			       .is_unwrit = 0 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit",
-	  .type = TEST_CREATE_BLOCKS,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .is_unwrit_at_start = 0,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -740,7 +528,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 			       .is_unwrit = 1 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split writ extent to 3 extents and convert 2nd half to unwrit",
-	  .type = TEST_CREATE_BLOCKS,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .is_unwrit_at_start = 0,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -758,7 +545,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 
 	/* writ to unwrit splits (zeroout) */
 	{ .desc = "split writ extent to 2 extents and convert 1st half unwrit (zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 0,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -773,7 +559,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split writ extent to 2 extents and convert 2nd half unwrit (zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 0,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -788,7 +573,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split writ extent to 3 extents and convert 2nd half unwrit (zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 0,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT_UNWRITTEN,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -811,7 +595,6 @@ static const struct kunit_ext_test_param test_convert_initialized_params[] = {
 static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 	/* unwrit to writ splits via endio path */
 	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -824,7 +607,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			       .is_unwrit = 1 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -837,7 +619,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			       .is_unwrit = 0 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split unwrit extent to 3 extents and convert 2nd half to writ (endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -855,7 +636,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 
 	/* unwrit to writ splits via non-endio path */
 	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (non endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -869,7 +649,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			       .is_unwrit = 1 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (non endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -883,7 +662,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 			       .is_unwrit = 0 } },
 	  .is_zeroout_test = 0 },
 	{ .desc = "split unwrit extent to 3 extents and convert 2nd half to writ (non endio)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -905,7 +683,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 	 */
 	/* unwrit to writ splits (endio)*/
 	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -920,7 +697,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -935,7 +711,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split unwrit extent to 3 extents and convert 2nd half writ (endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CONVERT,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -955,7 +730,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 
 	/* unwrit to writ splits (non-endio)*/
 	{ .desc = "split unwrit extent to 2 extents and convert 1st half writ (non-endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK, .m_len = 1 },
@@ -970,7 +744,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split unwrit extent to 2 extents and convert 2nd half writ (non-endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 1 },
@@ -985,7 +758,6 @@ static const struct kunit_ext_test_param test_handle_unwritten_params[] = {
 				.off_blk = 1,
 				.len_blk = EXT_DATA_LEN - 1 } } },
 	{ .desc = "split unwrit extent to 3 extents and convert 2nd half writ (non-endio, zeroout)",
-	  .type = TEST_CREATE_BLOCKS,
 	  .is_unwrit_at_start = 1,
 	  .split_flags = EXT4_GET_BLOCKS_CREATE,
 	  .split_map = { .m_lblk = EXT_DATA_LBLK + 1, .m_len = EXT_DATA_LEN - 2 },
@@ -1009,17 +781,7 @@ static void ext_get_desc(struct kunit *test, const void *p, char *desc)
 {
 	struct kunit_ext_test_param *param = (struct kunit_ext_test_param *)p;
 
-	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s %s\n", param->desc,
-		 (param->type & TEST_CREATE_BLOCKS) ? "(highlevel)" : "");
-}
-
-static int test_split_convert_param_init(struct kunit *test)
-{
-	size_t arr_size = ARRAY_SIZE(test_split_convert_params);
-
-	kunit_register_params_array(test, test_split_convert_params, arr_size,
-				    ext_get_desc);
-	return 0;
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s\n", param->desc);
 }
 
 static int test_convert_initialized_param_init(struct kunit *test)
@@ -1048,8 +810,6 @@ static int test_handle_unwritten_init(struct kunit *test)
  * https://lore.kernel.org/linux-kselftest/aULJpTvJDw9ctUDe@li-dc0c254c-257c-11b2-a85c-98b6c1322444.ibm.com/
  */
 static struct kunit_case extents_test_cases[] = {
-	KUNIT_CASE_PARAM_WITH_INIT(test_split_convert, kunit_array_gen_params,
-				   test_split_convert_param_init, NULL),
 	KUNIT_CASE_PARAM_WITH_INIT(test_split_convert, kunit_array_gen_params,
 				   test_convert_initialized_param_init, NULL),
 	KUNIT_CASE_PARAM_WITH_INIT(test_split_convert, kunit_array_gen_params,
