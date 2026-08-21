@@ -3446,6 +3446,10 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 	if (err)
 		return err;
 
+	trace_ext4_extent_zeroout(inode, map,
+			ee_block, ee_len, flags,
+			ext4_ext_is_unwritten(ex));
+
 	return 0;
 }
 
@@ -3486,6 +3490,9 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 
 	/* Do not cache extents that are in the process of being modified. */
 	flags |= EXT4_EX_NOCACHE;
+
+	trace_ext4_extent_split(inode, map, ee_block, ee_len, flags,
+				ext4_ext_is_unwritten(ex));
 
 	if (map->m_lblk + map->m_len < ee_block + ee_len) {
 		path = ext4_split_extent_at(handle, inode, path,
@@ -3784,6 +3791,11 @@ success:
 	/* Update path to point to the right extent */
 	path[depth].p_ext = abut_ex;
 
+	/* We were able to merge into a neighboring extend */
+	trace_ext4_extent_fast_merge(inode, map, le16_to_cpu(abut_ex->ee_block),
+				     ext4_ext_get_actual_len(abut_ex), flags,
+				     ext4_ext_is_unwritten(abut_ex));
+
 	return path;
 
 err:
@@ -3911,6 +3923,10 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	ee_block = le32_to_cpu(ex->ee_block);
 	ee_len = ext4_ext_get_actual_len(ex);
 
+	trace_ext4_split_convert_enter(inode, map, ee_block, ee_len,
+					       flags,
+					       ext4_ext_is_unwritten(ex));
+
 	/* No split needed */
 	if (ee_block == map->m_lblk && ee_len == map->m_len)
 		goto convert;
@@ -3963,6 +3979,11 @@ convert:
 
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
+
+	trace_ext4_extent_convert(inode, map,
+			le32_to_cpu(ex->ee_block),
+			ext4_ext_get_actual_len(ex),
+			flags, ext4_ext_is_unwritten(ex));
 
 	/*
 	 * Conversion is already handled in case of zeroout

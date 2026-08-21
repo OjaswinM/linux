@@ -2273,6 +2273,49 @@ DEFINE_EVENT(ext4__es_extent, ext4_es_cache_extent,
 	TP_ARGS(inode, es)
 );
 
+TRACE_EVENT(ext4_es_cache_extent_conflict,
+	TP_PROTO(struct inode *inode, ext4_lblk_t lblk, ext4_lblk_t len,
+		 ext4_fsblk_t pblk, unsigned int status,
+		 struct extent_status *conflict_es),
+
+	TP_ARGS(inode, lblk, len, pblk, status, conflict_es),
+
+	TP_STRUCT__entry(
+		__field(	dev_t,		dev		)
+		__field(	u64,		ino		)
+		__field(	ext4_lblk_t,	lblk		)
+		__field(	ext4_lblk_t,	len		)
+		__field(	ext4_fsblk_t,	pblk		)
+		__field(	unsigned int,	status		)
+		__field(	ext4_lblk_t,	conflict_lblk	)
+		__field(	ext4_lblk_t,	conflict_len	)
+		__field(	ext4_fsblk_t,	conflict_pblk	)
+		__field(	unsigned int,	conflict_status	)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= inode->i_sb->s_dev;
+		__entry->ino		= inode->i_ino;
+		__entry->lblk		= lblk;
+		__entry->len		= len;
+		__entry->pblk		= pblk;
+		__entry->status		= status;
+		__entry->conflict_lblk	= conflict_es->es_lblk;
+		__entry->conflict_len	= conflict_es->es_len;
+		__entry->conflict_pblk	= ext4_es_pblock(conflict_es);
+		__entry->conflict_status = ext4_es_status(conflict_es);
+	),
+
+	TP_printk("dev %d,%d ino %llu new extent [%u/%u) pblk %llu status 0x%x "
+		  "conflicts with cached extent [%u/%u) pblk %llu status 0x%x",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->ino,
+		  __entry->lblk, __entry->len,
+		  __entry->pblk, __entry->status,
+		  __entry->conflict_lblk, __entry->conflict_len,
+		  __entry->conflict_pblk, __entry->conflict_status)
+);
+
 TRACE_EVENT(ext4_es_remove_extent,
 	TP_PROTO(struct inode *inode, ext4_lblk_t lblk, ext4_lblk_t len),
 
@@ -3158,6 +3201,79 @@ TRACE_EVENT(ext4_move_extent_exit,
 		  __entry->donor_ino,  __entry->donor_lblk,
 		  __entry->m_len, __entry->move_len, __entry->move_type,
 		  __entry->ret)
+);
+
+DECLARE_EVENT_CLASS(ext4_split_convert,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit),
+
+	TP_STRUCT__entry(
+		__field(	dev_t,		dev		)
+		__field(	u64,		ino		)
+		__field(	ext4_lblk_t,	m_lblk		)
+		__field(	unsigned int,	m_len		)
+		__field(	ext4_lblk_t,	ee_block	)
+		__field(	unsigned int,	ee_len		)
+		__field(	int,		flags		)
+		__field(	bool,		is_unwrit	)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= inode->i_sb->s_dev;
+		__entry->ino		= inode->i_ino;
+		__entry->m_lblk		= map->m_lblk;
+		__entry->m_len		= map->m_len;
+		__entry->ee_block	= ee_block;
+		__entry->ee_len		= ee_len;
+		__entry->flags		= flags;
+		__entry->is_unwrit	= is_unwrit;
+	),
+
+	TP_printk("dev %d,%d ino %llu m_lblk %u m_len %u ee_block %u ee_len %u is_unwrit %d flags %s",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->ino,
+		  __entry->m_lblk, __entry->m_len,
+		  __entry->ee_block, __entry->ee_len,
+		  __entry->is_unwrit,
+		  show_map_flags(__entry->flags))
+);
+
+DEFINE_EVENT(ext4_split_convert, ext4_split_convert_enter,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit)
+);
+
+DEFINE_EVENT(ext4_split_convert, ext4_extent_fast_merge,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit)
+);
+
+DEFINE_EVENT(ext4_split_convert, ext4_extent_zeroout,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit)
+);
+
+DEFINE_EVENT(ext4_split_convert, ext4_extent_split,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit)
+);
+
+DEFINE_EVENT(ext4_split_convert, ext4_extent_convert,
+	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map,
+		 ext4_lblk_t ee_block, unsigned int ee_len,
+		 int flags, bool is_unwrit),
+	TP_ARGS(inode, map, ee_block, ee_len, flags, is_unwrit)
 );
 
 #endif /* _TRACE_EXT4_H */

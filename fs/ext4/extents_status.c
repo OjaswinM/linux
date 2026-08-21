@@ -1108,6 +1108,8 @@ unlock:
 	    ext4_es_type(&chkes) == EXTENT_STATUS_CONVERT_PENDING)
 		return;
 
+	trace_ext4_es_cache_extent_conflict(inode, lblk, len, pblk, status,
+					    &chkes);
 	ext4_warning_inode(inode,
 			   "ES cache extent failed: add [%d,%d,%llu,0x%x] conflict with existing [%d,%d,%llu,0x%x]\n",
 			   lblk, len, pblk, status, chkes.es_lblk, chkes.es_len,
