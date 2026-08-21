@@ -41,6 +41,7 @@ typedef enum {
 	attr_pointer_atomic,
 	attr_journal_task,
 	attr_err_report_sec,
+	attr_extent_split_mode,
 } attr_id_t;
 
 typedef enum {
@@ -158,6 +159,26 @@ static ssize_t err_report_sec_store(struct ext4_sb_info *sbi,
 	mod_timer(&sbi->s_err_report, jiffies + secs_to_jiffies(sbi->s_err_report_sec));
 
 out:
+	return count;
+}
+
+static ssize_t extent_split_mode_show(struct ext4_sb_info *sbi, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", sbi->s_extent_split_mode);
+}
+
+static ssize_t extent_split_mode_store(struct ext4_sb_info *sbi,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+	int ret;
+
+	ret = kstrtouint(skip_spaces(buf), 0, &val);
+	if (ret)
+		return ret;
+	if (val > 3)
+		return -EINVAL;
+	sbi->s_extent_split_mode = val;
 	return count;
 }
 
@@ -288,6 +309,7 @@ EXT4_RW_ATTR_SBI_UI(mb_prefetch_limit, s_mb_prefetch_limit);
 EXT4_RW_ATTR_SBI_UL(last_trim_minblks, s_last_trim_minblks);
 EXT4_RW_ATTR_SBI_UI(sb_update_sec, s_sb_update_sec);
 EXT4_RW_ATTR_SBI_UI(sb_update_kb, s_sb_update_kb);
+EXT4_ATTR_FUNC(extent_split_mode, 0644);
 
 static unsigned int old_bump_val = 128;
 EXT4_ATTR_PTR(max_writeback_mb_bump, 0444, pointer_ui, &old_bump_val);
@@ -342,6 +364,7 @@ static struct attribute *ext4_attrs[] = {
 	ATTR_LIST(sb_update_sec),
 	ATTR_LIST(sb_update_kb),
 	ATTR_LIST(err_report_sec),
+	ATTR_LIST(extent_split_mode),
 	NULL,
 };
 ATTRIBUTE_GROUPS(ext4);
@@ -483,6 +506,8 @@ static ssize_t ext4_attr_show(struct kobject *kobj,
 		return print_tstamp(buf, sbi->s_es, s_last_error_time);
 	case attr_journal_task:
 		return journal_task_show(sbi, buf);
+	case attr_extent_split_mode:
+		return extent_split_mode_show(sbi, buf);
 	default:
 		return ext4_generic_attr_show(a, sbi, buf);
 	}
@@ -561,6 +586,8 @@ static ssize_t ext4_attr_store(struct kobject *kobj,
 		return trigger_test_error(sbi, buf, len);
 	case attr_err_report_sec:
 		return err_report_sec_store(sbi, buf, len);
+	case attr_extent_split_mode:
+		return extent_split_mode_store(sbi, buf, len);
 	default:
 		return ext4_generic_attr_store(a, sbi, buf, len);
 	}

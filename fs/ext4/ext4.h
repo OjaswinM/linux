@@ -1745,6 +1745,16 @@ struct ext4_sb_info {
 	/* the size of zero-out chunk */
 	unsigned int s_extent_max_zeroout_kb;
 
+	/*
+	 * Controls which optimisation paths in ext4_split_convert_extents()
+	 * are tried:
+	 *   0 - neither (both optimisations skipped)
+	 *   1 - fast-merge only
+	 *   2 - zeroout only
+	 *   3 - both (default)
+	 */
+	unsigned int s_extent_split_mode;
+
 	unsigned int s_log_groups_per_flex;
 	struct flex_groups * __rcu *s_flex_groups;
 	ext4_group_t s_flex_groups_allocated;

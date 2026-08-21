@@ -3938,22 +3938,24 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	split_flag |= ee_block + ee_len <= eof_block ? EXT4_EXT_MAY_ZEROOUT : 0;
 
 	/* fast merge optimization */
-	struct ext4_ext_path *orig_path = path;
+	if (sbi->s_extent_split_mode & 1) {
+		struct ext4_ext_path *orig_path = path;
 
-	path = ext4_ext_split_fast_merge(handle, inode, map, path, flags);
-	if (IS_ERR(path))
-		return path;
-	/* We were able to merge into a neighboring extend */
-	if (path) {
-		/* Path now points to the new merged extent */
-		ex = path[depth].p_ext;
-		goto es_update;
+		path = ext4_ext_split_fast_merge(handle, inode, map, path, flags);
+		if (IS_ERR(path))
+			return path;
+		/* We were able to merge into a neighboring extend */
+		if (path) {
+			/* Path now points to the new merged extent */
+			ex = path[depth].p_ext;
+			goto es_update;
+		}
+
+		path = orig_path;
 	}
 
-	path = orig_path;
-
-	/* zeroout optimization */
-	if (split_flag & EXT4_EXT_MAY_ZEROOUT) {
+	/* zeroout optimization (skipped when mode is 1) */
+	if ((sbi->s_extent_split_mode & 2) && (split_flag & EXT4_EXT_MAY_ZEROOUT)) {
 		int max_zeroout = sbi->s_extent_max_zeroout_kb >>
 				  (inode->i_sb->s_blocksize_bits - 10);
 		err = ext4_split_extent_zeroout(handle, inode, path, &split_map,

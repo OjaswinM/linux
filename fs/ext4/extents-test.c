@@ -411,6 +411,7 @@ static int extents_kunit_init(struct kunit *test)
 	}
 
 	sbi->s_sb = sb;
+	sbi->s_extent_split_mode = 3;
 	sb->s_fs_info = sbi;
 
 	sb->s_blocksize = 4096;
