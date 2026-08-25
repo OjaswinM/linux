@@ -3311,6 +3311,11 @@ out_path:
 	return path;
 }
 
+/*
+ * Try to zeroout the edges of an extent to avoid splitting it. In case we fail
+ * because we are only able to zeroout one edge, adjust the map to reflect the
+ * new range that should be split.
+ */
 static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 				     struct ext4_ext_path *path,
 				     struct ext4_map_blocks *map, int flags,
@@ -3356,6 +3361,9 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 			if (err)
 				/* ZEROOUT failed, just return original error */
 				return err;
+
+			map->m_lblk = lblk;
+			map->m_len += len;
 		}
 
 		/* zeroout right */
@@ -3439,6 +3447,7 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 	unsigned int ee_len, orig_ee_len, depth;
 	int unwritten, orig_unwritten;
 	int orig_err = 0;
+	struct ext4_map_blocks tmp_map = *map;
 
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
@@ -3534,7 +3543,7 @@ try_zeroout:
 	 * We pass max_zeroout=UINT_MAX cause we can be in endio scenarios and
 	 * we really want this to pass
 	 */
-	if (ext4_split_extent_zeroout(handle, inode, path, map, flags,
+	if (ext4_split_extent_zeroout(handle, inode, path, &tmp_map, flags,
 				      UINT_MAX))
 		goto out_free_path;
 
