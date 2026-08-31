@@ -43,7 +43,7 @@
 					due to ENOSPC */
 static struct ext4_ext_path *ext4_split_convert_extents(
 	handle_t *handle, struct inode *inode, struct ext4_map_blocks *map,
-	struct ext4_ext_path *path, int flags, unsigned int *allocated);
+	struct ext4_ext_path *path, int flags);
 
 static __le32 ext4_extent_block_csum(struct inode *inode,
 				     struct ext4_extent_header *eh)
@@ -3469,7 +3469,7 @@ static struct ext4_ext_path *ext4_split_extent(handle_t *handle,
 					       struct ext4_ext_path *path,
 					       struct ext4_map_blocks *map,
 					       int split_flag, int flags,
-					       unsigned int *allocated, bool *did_zeroout)
+					       bool *did_zeroout)
 {
 	ext4_lblk_t ee_block, orig_ee_block;
 	struct ext4_extent *ex;
@@ -3579,12 +3579,6 @@ try_zeroout:
 		*did_zeroout = true;
 
 success:
-	if (allocated) {
-		if (map->m_lblk + map->m_len > ee_block + ee_len)
-			*allocated = ee_len - (map->m_lblk - ee_block);
-		else
-			*allocated = map->m_len;
-	}
 	ext4_ext_show_leaf(inode, path);
 	return path;
 
@@ -3826,7 +3820,7 @@ err:
 static struct ext4_ext_path *
 ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 			struct ext4_map_blocks *map, struct ext4_ext_path *path,
-			int flags, unsigned int *allocated)
+			int flags)
 {
 	struct ext4_sb_info *sbi;
 	struct ext4_extent_header *eh;
@@ -3852,22 +3846,8 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
 
 	trace_ext4_ext_convert_to_initialized_enter(inode, map, ex);
 
-	path = ext4_split_convert_extents(handle, inode, &split_map, path,
-					  flags | EXT4_GET_BLOCKS_CONVERT, NULL);
-	if (IS_ERR(path))
-		return path;
-
-	/*
-	 * We might have merged the extent to neighbors, lets update allocated.
-	 */
-	ex = path[ext_depth(inode)].p_ext;
-	ee_block = le32_to_cpu(ex->ee_block);
-	ee_len = ext4_ext_get_actual_len(ex);
-	if (allocated)
-		*allocated = ee_len - (map->m_lblk - ee_block);
-
-	return path;
-
+	return ext4_split_convert_extents(handle, inode, &split_map, path,
+					  flags | EXT4_GET_BLOCKS_CONVERT);
 }
 
 /*
@@ -3892,15 +3872,13 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
  * being filled will be convert to initialized by the end_io callback function
  * via ext4_convert_unwritten_extents().
  *
- * The size of unwritten extent to be written is passed to the caller via the
- * allocated pointer. Return an extent path pointer on success, or an error
- * pointer on failure.
+ * Return an extent path pointer on success, or an error pointer on failure.
  */
 static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 					struct inode *inode,
 					struct ext4_map_blocks *map,
 					struct ext4_ext_path *path,
-					int flags, unsigned int *allocated)
+					int flags)
 {
 	ext4_lblk_t eof_block;
 	ext4_lblk_t ee_block;
@@ -3970,7 +3948,7 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	 */
 	path = ext4_split_extent(handle, inode, path, &split_map, split_flag,
 				 flags | EXT4_GET_BLOCKS_SPLIT_NOMERGE,
-				 allocated, &did_zeroout);
+				 &did_zeroout);
 	if (IS_ERR(path))
 		return path;
 
@@ -4067,16 +4045,40 @@ ext4_convert_unwritten_extents_endio(handle_t *handle, struct inode *inode,
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
 		  (unsigned long long)ee_block, ee_len);
 
-	return ext4_split_convert_extents(handle, inode, map, path, flags,
-					  NULL);
+	return ext4_split_convert_extents(handle, inode, map, path, flags);
 }
 
+/*
+ * If map->m_len is larger than the available extent, trim it to the end of the
+ * extent
+ */
+static inline void ext4_ext_map_trim(struct inode *inode,
+				     struct ext4_map_blocks *map,
+				     struct ext4_ext_path *path)
+{
+	struct ext4_extent *ex;
+	ext4_lblk_t ee_block;
+	unsigned int ee_len;
+	int depth;
+
+	depth = ext_depth(inode);
+	ex = path[depth].p_ext;
+	ee_block = le32_to_cpu(ex->ee_block);
+	ee_len = ext4_ext_get_actual_len(ex);
+
+	map->m_len = min_t(unsigned int, map->m_len,
+			   ee_len - (map->m_lblk - ee_block));
+}
+
+/*
+ * Converts an initialized extent to unwritten. Returns the map->m_len updated
+ * to the no. of blocks we were able to convert.
+ */
 static struct ext4_ext_path *
 convert_initialized_extent(handle_t *handle, struct inode *inode,
 			   struct ext4_map_blocks *map,
 			   struct ext4_ext_path *path,
-			   int flags,
-			   unsigned int *allocated)
+			   int flags)
 {
 	struct ext4_extent *ex;
 	ext4_lblk_t ee_block;
@@ -4098,8 +4100,7 @@ convert_initialized_extent(handle_t *handle, struct inode *inode,
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
 		  (unsigned long long)ee_block, ee_len);
 
-	path = ext4_split_convert_extents(handle, inode, map, path, flags,
-					  NULL);
+	path = ext4_split_convert_extents(handle, inode, map, path, flags);
 	if (IS_ERR(path))
 		return path;
 
@@ -4121,23 +4122,26 @@ convert_initialized_extent(handle_t *handle, struct inode *inode,
 		map->m_flags |= EXT4_MAP_UNWRITTEN;
 	else
 		map->m_flags |= EXT4_MAP_MAPPED;
-	if (*allocated > map->m_len)
-		*allocated = map->m_len;
-	map->m_len = *allocated;
+
+	ext4_ext_map_trim(inode, map, path);
 	return path;
 }
 
+/*
+ * Converts unwritten extent to written for endio (EXT4_GET_BLOCKS_CONVERT) as
+ * well as non endio (EXT4_GET_BLOCK_CREATE) paths. Returns map->m_len updated
+ * to the number of blocks we were able to convert.
+ */
 static struct ext4_ext_path *
 ext4_ext_handle_unwritten_extents(handle_t *handle, struct inode *inode,
 			struct ext4_map_blocks *map,
 			struct ext4_ext_path *path, int flags,
-			unsigned int *allocated, ext4_fsblk_t newblock)
+			ext4_fsblk_t newblock)
 {
 	int err = 0;
 
-	ext_debug(inode, "logical block %llu, max_blocks %u, flags 0x%x, allocated %u\n",
-		  (unsigned long long)map->m_lblk, map->m_len, flags,
-		  *allocated);
+	ext_debug(inode, "logical block %llu, max_blocks %u, flags 0x%x\n",
+		  (unsigned long long)map->m_lblk, map->m_len, flags);
 	ext4_ext_show_leaf(inode, path);
 
 	/*
@@ -4146,8 +4150,7 @@ ext4_ext_handle_unwritten_extents(handle_t *handle, struct inode *inode,
 	 */
 	flags |= EXT4_GET_BLOCKS_METADATA_NOFAIL;
 
-	trace_ext4_ext_handle_unwritten_extents(inode, map, flags,
-						*allocated, newblock);
+	trace_ext4_ext_handle_unwritten_extents(inode, map, flags, newblock);
 
 	/* IO end_io complete, convert the filled extent to written */
 	if (flags & EXT4_GET_BLOCKS_CONVERT) {
@@ -4186,31 +4189,30 @@ ext4_ext_handle_unwritten_extents(handle_t *handle, struct inode *inode,
 	 * For buffered writes, at writepage time, etc.  Convert a
 	 * discovered unwritten extent to written.
 	 */
-	path = ext4_ext_convert_to_initialized(handle, inode, map, path,
-					       flags, allocated);
+	path = ext4_ext_convert_to_initialized(handle, inode, map, path, flags);
 	if (IS_ERR(path))
 		return path;
-	ext4_update_inode_fsync_trans(handle, inode, 1);
-	/*
-	 * shouldn't get a 0 allocated when converting an unwritten extent
-	 * unless m_len is 0 (bug) or extent has been corrupted
-	 */
-	if (unlikely(*allocated == 0)) {
-		EXT4_ERROR_INODE(inode, "unexpected allocated == 0, m_len = %u",
-				 map->m_len);
-		err = -EFSCORRUPTED;
-		goto errout;
-	}
 
+	ext4_update_inode_fsync_trans(handle, inode, 1);
 	map->m_flags |= EXT4_MAP_NEW;
 map_out:
 	map->m_flags |= EXT4_MAP_MAPPED;
 out1:
 	map->m_pblk = newblock;
-	if (*allocated > map->m_len)
-		*allocated = map->m_len;
-	map->m_len = *allocated;
+
+	ext4_ext_map_trim(inode, map, path);
 	ext4_ext_show_leaf(inode, path);
+
+	/*
+	 * shouldn't get m_len == 0 when converting an extent
+	 * unless m_len is 0 (bug) or extent has been corrupted
+	 */
+	if (unlikely(map->m_len == 0)) {
+		EXT4_ERROR_INODE(inode, "unexpected m_len == 0");
+		err = -EFSCORRUPTED;
+		goto errout;
+	}
+
 	return path;
 
 errout:
@@ -4462,8 +4464,6 @@ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 		/* if found extent covers block, simply return it */
 		if (in_range(map->m_lblk, ee_block, ee_len)) {
 			newblock = map->m_lblk - ee_block + ee_start;
-			/* number of remaining blocks in the extent */
-			allocated = ee_len - (map->m_lblk - ee_block);
 			ext_debug(inode, "%u fit into %u:%d -> %llu\n",
 				  map->m_lblk, ee_block, ee_len, newblock);
 
@@ -4474,25 +4474,31 @@ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 			if ((!ext4_ext_is_unwritten(ex)) &&
 			    (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN)) {
 				path = convert_initialized_extent(handle,
-					inode, map, path, flags, &allocated);
+					inode, map, path, flags);
 				if (IS_ERR(path))
 					err = PTR_ERR(path);
+				else
+					allocated = map->m_len;
+
 				goto out;
 			} else if (!ext4_ext_is_unwritten(ex)) {
 				map->m_flags |= EXT4_MAP_MAPPED;
 				map->m_pblk = newblock;
-				if (allocated > map->m_len)
-					allocated = map->m_len;
-				map->m_len = allocated;
+
+				ext4_ext_map_trim(inode, map, path);
+				allocated = map->m_len;
+
 				ext4_ext_show_leaf(inode, path);
 				goto out;
 			}
 
 			path = ext4_ext_handle_unwritten_extents(
-				handle, inode, map, path, flags,
-				&allocated, newblock);
+				handle, inode, map, path, flags, newblock);
 			if (IS_ERR(path))
 				err = PTR_ERR(path);
+			else
+				allocated = map->m_len;
+
 			goto out;
 		}
 	}

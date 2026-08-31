@@ -1945,9 +1945,9 @@ DEFINE_EVENT(ext4__trim, ext4_trim_all_free,
 
 TRACE_EVENT(ext4_ext_handle_unwritten_extents,
 	TP_PROTO(struct inode *inode, struct ext4_map_blocks *map, int flags,
-		 unsigned int allocated, ext4_fsblk_t newblock),
+		 ext4_fsblk_t newblock),
 
-	TP_ARGS(inode, map, flags, allocated, newblock),
+	TP_ARGS(inode, map, flags, newblock),
 
 	TP_STRUCT__entry(
 		__field(	u64,		ino		)
@@ -1957,7 +1957,6 @@ TRACE_EVENT(ext4_ext_handle_unwritten_extents,
 		__field(	int,		flags		)
 		__field(	ext4_lblk_t,	lblk		)
 		__field(	unsigned int,	len		)
-		__field(	unsigned int,	allocated	)
 	),
 
 	TP_fast_assign(
@@ -1967,17 +1966,15 @@ TRACE_EVENT(ext4_ext_handle_unwritten_extents,
 		__entry->lblk		= map->m_lblk;
 		__entry->pblk		= map->m_pblk;
 		__entry->len		= map->m_len;
-		__entry->allocated	= allocated;
 		__entry->newblk		= newblock;
 	),
 
 	TP_printk("dev %d,%d ino %llu m_lblk %u m_pblk %llu m_len %u flags %s "
-		  "allocated %d newblock %llu",
+		  "newblock %llu",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->ino,
 		  (unsigned) __entry->lblk, (unsigned long long) __entry->pblk,
 		  __entry->len, show_map_flags(__entry->flags),
-		  (unsigned int) __entry->allocated,
 		  (unsigned long long) __entry->newblk)
 );
 
