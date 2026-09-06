@@ -4009,14 +4009,13 @@ convert:
 	 * the bigger merged one.
 	 */
 es_update:
-	if (!(flags & EXT4_EX_NOCACHE))
-		ext4_es_insert_extent(inode, le32_to_cpu(ex->ee_block),
-				      ext4_ext_get_actual_len(ex),
-				      ext4_ext_pblock(ex),
-				      ext4_ext_is_unwritten(ex) ?
-					      EXTENT_STATUS_UNWRITTEN :
-					      EXTENT_STATUS_WRITTEN,
-				      false);
+	ext4_es_insert_extent(inode, le32_to_cpu(ex->ee_block),
+				ext4_ext_get_actual_len(ex),
+				ext4_ext_pblock(ex),
+				ext4_ext_is_unwritten(ex) ?
+					EXTENT_STATUS_UNWRITTEN :
+					EXTENT_STATUS_WRITTEN,
+				false);
 
 err:
 	if (err) {
