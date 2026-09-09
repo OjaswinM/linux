@@ -36,6 +36,7 @@ enum {
 	ES_DELAYED_B,
 	ES_HOLE_B,
 	ES_REFERENCED_B,
+	ES_CONVERT_PENDING_B,
 	ES_FLAGS
 };
 
@@ -51,10 +52,12 @@ enum {
 #define EXTENT_STATUS_DELAYED	(1 << ES_DELAYED_B)
 #define EXTENT_STATUS_HOLE	(1 << ES_HOLE_B)
 #define EXTENT_STATUS_REFERENCED	(1 << ES_REFERENCED_B)
+#define EXTENT_STATUS_CONVERT_PENDING	(1 << ES_CONVERT_PENDING_B)
 
 #define ES_TYPE_MASK	((ext4_fsblk_t)(EXTENT_STATUS_WRITTEN | \
 			  EXTENT_STATUS_UNWRITTEN | \
 			  EXTENT_STATUS_DELAYED | \
+			  EXTENT_STATUS_CONVERT_PENDING | \
 			  EXTENT_STATUS_HOLE))
 
 #define ES_TYPE_VALID(type)	((type) && !((type) & ((type) - 1)))
@@ -173,7 +176,13 @@ static inline int ext4_es_is_written(struct extent_status *es)
 
 static inline int ext4_es_is_unwritten(struct extent_status *es)
 {
-	return (ext4_es_type(es) & EXTENT_STATUS_UNWRITTEN) != 0;
+	return (ext4_es_type(es) &
+		(EXTENT_STATUS_UNWRITTEN | EXTENT_STATUS_CONVERT_PENDING)) != 0;
+}
+
+static inline int ext4_es_is_convert_pending(struct extent_status *es)
+{
+	return (ext4_es_type(es) & EXTENT_STATUS_CONVERT_PENDING) != 0;
 }
 
 static inline int ext4_es_is_delayed(struct extent_status *es)
@@ -188,7 +197,8 @@ static inline int ext4_es_is_hole(struct extent_status *es)
 
 static inline int ext4_es_is_mapped(struct extent_status *es)
 {
-	return (ext4_es_is_written(es) || ext4_es_is_unwritten(es));
+	return (ext4_es_is_written(es) || ext4_es_is_unwritten(es) ||
+		ext4_es_is_convert_pending(es));
 }
 
 static inline void ext4_es_set_referenced(struct extent_status *es)

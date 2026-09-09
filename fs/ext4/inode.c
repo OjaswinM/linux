@@ -500,7 +500,7 @@ static void ext4_map_blocks_es_recheck(handle_t *handle,
 
 static int ext4_map_query_blocks_next_in_leaf(handle_t *handle,
 			struct inode *inode, struct ext4_map_blocks *map,
-			unsigned int orig_mlen)
+			unsigned int orig_mlen, int flags)
 {
 	struct ext4_map_blocks map2;
 	unsigned int status, status2;
@@ -541,11 +541,17 @@ static int ext4_map_query_blocks_next_in_leaf(handle_t *handle,
 	 */
 	if (map->m_pblk + map->m_len == map2.m_pblk &&
 			status == status2) {
+		if (status == EXTENT_STATUS_UNWRITTEN &&
+		    flags & EXT4_GET_BLOCKS_CONVERT_PENDING)
+			status = EXTENT_STATUS_CONVERT_PENDING;
 		ext4_es_cache_extent(inode, map->m_lblk,
 				     map->m_len + map2.m_len, map->m_pblk,
 				     status);
 		map->m_len += map2.m_len;
 	} else {
+		if (status == EXTENT_STATUS_UNWRITTEN &&
+		    flags & EXT4_GET_BLOCKS_CONVERT_PENDING)
+			status = EXTENT_STATUS_CONVERT_PENDING;
 		ext4_es_cache_extent(inode, map->m_lblk, map->m_len,
 				     map->m_pblk, status);
 	}
@@ -589,11 +595,12 @@ int ext4_map_query_blocks(handle_t *handle, struct inode *inode,
 			map->m_len == orig_mlen) {
 		status = map->m_flags & EXT4_MAP_UNWRITTEN ?
 				EXTENT_STATUS_UNWRITTEN : EXTENT_STATUS_WRITTEN;
+
 		ext4_es_cache_extent(inode, map->m_lblk, map->m_len,
 				     map->m_pblk, status);
 	} else {
 		retval = ext4_map_query_blocks_next_in_leaf(handle, inode, map,
-							    orig_mlen);
+							    orig_mlen, flags);
 	}
 out:
 	map->m_seq = READ_ONCE(EXT4_I(inode)->i_es_seq);
@@ -665,6 +672,9 @@ int ext4_map_create_blocks(handle_t *handle, struct inode *inode,
 
 	status = map->m_flags & EXT4_MAP_UNWRITTEN ?
 			EXTENT_STATUS_UNWRITTEN : EXTENT_STATUS_WRITTEN;
+	if (status == EXTENT_STATUS_UNWRITTEN &&
+	    flags & EXT4_GET_BLOCKS_CONVERT_PENDING)
+		status = EXTENT_STATUS_CONVERT_PENDING;
 	ext4_es_insert_extent(inode, map->m_lblk, map->m_len, map->m_pblk,
 			      status, flags & EXT4_GET_BLOCKS_DELALLOC_RESERVE);
 	map->m_seq = READ_ONCE(EXT4_I(inode)->i_es_seq);
@@ -791,8 +801,20 @@ found:
 	}
 
 	/* If it is only a block(s) look up */
-	if ((flags & EXT4_GET_BLOCKS_CREATE) == 0)
+	if ((flags & EXT4_GET_BLOCKS_CREATE) == 0) {
+		/*
+		 * even for lookups, we still need to make the range
+		 * CONVERT_PENDING if the caller has asked for it
+		 */
+		if (map->m_flags & EXT4_MAP_UNWRITTEN &&
+		    flags & EXT4_GET_BLOCKS_CONVERT_PENDING)
+			ext4_es_insert_extent(inode, map->m_lblk, map->m_len,
+					      map->m_pblk,
+					      EXTENT_STATUS_CONVERT_PENDING,
+					      false);
+
 		return retval;
+	}
 
 	/*
 	 * Returns if the blocks have already allocated
@@ -809,6 +831,20 @@ found:
 		if (!(flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN))
 			return retval;
 
+	/*
+	 * This means we have CREATE and UNWRIT_EXT in get block flags and we
+	 * found an existing unwritten extent. If the caller is not requesting
+	 * a conversion (CONVERT would be endio path; CONVERT_PENDING marks
+	 * in-flight DIO that must not be skipped), we can return early without
+	 * entering ext4_map_create_blocks().
+	 */
+	if (retval > 0 && map->m_flags & EXT4_MAP_UNWRITTEN &&
+	    flags & EXT4_GET_BLOCKS_UNWRIT_EXT &&
+	    !(flags &
+	      (EXT4_GET_BLOCKS_CONVERT | EXT4_GET_BLOCKS_CONVERT_PENDING))) {
+		map->m_flags |= EXT4_MAP_MAPPED;
+		return retval;
+	}
 
 	ext4_fc_track_inode(handle, inode);
 	/*
@@ -2392,7 +2428,8 @@ static int mpage_map_one_extent(handle_t *handle, struct mpage_da_data *mpd)
 
 	dioread_nolock = ext4_should_dioread_nolock(inode);
 	if (dioread_nolock)
-		get_blocks_flags |= EXT4_GET_BLOCKS_UNWRIT_EXT;
+		get_blocks_flags |= EXT4_GET_BLOCKS_UNWRIT_EXT |
+				    EXT4_GET_BLOCKS_CONVERT_PENDING;
 
 	err = ext4_map_blocks(handle, inode, map, get_blocks_flags);
 	if (err < 0)
@@ -3746,7 +3783,8 @@ retry:
 	else if (EXT4_LBLK_TO_B(inode, map->m_lblk) >= i_size_read(inode))
 		m_flags = EXT4_GET_BLOCKS_CREATE;
 	else if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
-		m_flags = EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT;
+		m_flags = EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT |
+			  EXT4_GET_BLOCKS_CONVERT_PENDING;
 
 	if (flags & IOMAP_ATOMIC)
 		ret = ext4_map_blocks_atomic_write(handle, inode, map, m_flags,
@@ -3816,7 +3854,8 @@ static int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 		 * especially in multi-threaded overwrite requests.
 		 */
 		if (offset + length <= i_size_read(inode)) {
-			ret = ext4_map_blocks(NULL, inode, &map, 0);
+			ret = ext4_map_blocks(NULL, inode, &map,
+					      EXT4_GET_BLOCKS_CONVERT_PENDING);
 			/*
 			 * For DAX we convert extents to initialized ones before
 			 * copying the data, otherwise we do it after I/O so

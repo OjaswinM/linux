@@ -181,7 +181,8 @@ static int __es_insert_extent(struct inode *inode, struct extent_status *newes,
 static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 			      ext4_lblk_t end, unsigned int status,
 			      int *reserved, struct extent_status *res,
-			      struct extent_status *prealloc);
+			      struct extent_status *prealloc,
+			      bool *preserve_conv_pending);
 static int es_reclaim_extents(struct ext4_inode_info *ei, int *nr_to_scan);
 static int __es_shrink(struct ext4_sb_info *sbi, int nr_to_scan,
 		       struct ext4_inode_info *locked_ei);
@@ -529,6 +530,9 @@ static inline bool ext4_es_must_keep(struct extent_status *es)
 	if (ext4_es_is_delayed(es))
 		return true;
 
+	if (ext4_es_is_convert_pending(es))
+		return true;
+
 	return false;
 }
 
@@ -592,6 +596,12 @@ static int ext4_es_can_be_merged(struct extent_status *es1,
 				 struct extent_status *es2)
 {
 	if (ext4_es_type(es1) != ext4_es_type(es2))
+		return 0;
+
+	/*
+	 * Don't merge block range that's about to get converted to written.
+	 */
+	if (ext4_es_is_convert_pending(es1))
 		return 0;
 
 	if (((__u64) es1->es_len) + es2->es_len > EXT_MAX_BLOCKS) {
@@ -915,6 +925,7 @@ void ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
 	struct extent_status *es2 = NULL;
 	struct pending_reservation *pr = NULL;
 	bool revise_pending = false;
+	bool preserve_conv_pending = status & EXTENT_STATUS_UNWRITTEN;
 
 	if (EXT4_SB(inode->i_sb)->s_mount_state & EXT4_FC_REPLAY)
 		return;
@@ -947,7 +958,8 @@ retry:
 		pr = __alloc_pending(true);
 	write_lock(&EXT4_I(inode)->i_es_lock);
 
-	err1 = __es_remove_extent(inode, lblk, end, 0, &resv_used, NULL, es1);
+	err1 = __es_remove_extent(inode, lblk, end, 0, &resv_used, NULL, es1,
+				  &preserve_conv_pending);
 	if (err1 != 0)
 		goto error;
 	/* Free preallocated extent if it didn't get used. */
@@ -956,6 +968,16 @@ retry:
 			__es_free_extent(es1);
 		es1 = NULL;
 	}
+
+	/*
+	 * For now, to keep things simple we don't insert an unwritten extent if
+	 * there are conver pending extents already in the range. Hopefully they
+	 * will be cached once we finish the endio conversoin, however this can
+	 * be implemented later if performance issues are noticed.
+	 * TODO: Check revise_pending stuff
+	 */
+	if (preserve_conv_pending)
+		goto inc_seq;
 
 	err2 = __es_insert_extent(inode, &newes, es2);
 	if (err2 == -ENOMEM && !ext4_es_must_keep(&newes))
@@ -979,6 +1001,7 @@ retry:
 		}
 		pending = err3;
 	}
+inc_seq:
 	ext4_es_inc_seq(inode);
 error:
 	write_unlock(&EXT4_I(inode)->i_es_lock);
@@ -1054,7 +1077,7 @@ void ext4_es_cache_extent(struct inode *inode, ext4_lblk_t lblk,
 		}
 		/* Check and remove all extents in range. */
 		err = __es_remove_extent(inode, lblk, end, status, NULL,
-					 &chkes, NULL);
+					 &chkes, NULL, NULL);
 		if (err) {
 			if (err == -EINVAL)
 				conflict = true;
@@ -1074,6 +1097,15 @@ unlock:
 	 */
 	if (status == EXTENT_STATUS_HOLE &&
 	    ext4_es_type(&chkes) == EXTENT_STATUS_DELAYED)
+		return;
+
+	/*
+	 * An ondisk unwritten extent is allowed to conflict with
+	 * convert_pending since the latter signifies an ondisk unwritten extent
+	 * about to be converted to written due to endio.
+	 */
+	if (status == EXTENT_STATUS_UNWRITTEN &&
+	    ext4_es_type(&chkes) == EXTENT_STATUS_CONVERT_PENDING)
 		return;
 
 	ext4_warning_inode(inode,
@@ -1481,7 +1513,8 @@ static unsigned int get_rsvd(struct inode *inode, ext4_lblk_t end,
 static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 			      ext4_lblk_t end, unsigned int status,
 			      int *reserved, struct extent_status *res,
-			      struct extent_status *prealloc)
+			      struct extent_status *prealloc,
+			      bool *preserve_conv_pending)
 {
 	struct ext4_es_tree *tree = &EXT4_I(inode)->i_es_tree;
 	struct rb_node *node;
@@ -1492,6 +1525,16 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 	int err;
 	bool count_reserved = true;
 	struct rsvd_count rc;
+	bool has_conv_pending = false;
+	bool preserve_es = preserve_conv_pending && *preserve_conv_pending;
+
+
+	/*
+	 * Reset it - we will set it again based on if the range had a convert
+	 * pending entry
+	 */
+	if (preserve_es)
+		*preserve_conv_pending = false;
 
 	if (reserved == NULL || !test_opt(inode->i_sb, DELALLOC))
 		count_reserved = false;
@@ -1519,6 +1562,12 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 
 	len1 = lblk > es->es_lblk ? lblk - es->es_lblk : 0;
 	len2 = ext4_es_end(es) > end ? ext4_es_end(es) - end : 0;
+
+	if (ext4_es_is_convert_pending(es) && preserve_es) {
+		has_conv_pending = true;
+		goto next;
+	}
+
 	if (len1 > 0)
 		es->es_len = len1;
 	if (len2 > 0) {
@@ -1528,8 +1577,7 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 			newes.es_lblk = end + 1;
 			newes.es_len = len2;
 			block = 0x7FDEADBEEFULL;
-			if (ext4_es_is_written(&orig_es) ||
-			    ext4_es_is_unwritten(&orig_es))
+			if (ext4_es_is_mapped(es))
 				block = ext4_es_pblock(&orig_es) +
 					orig_es.es_len - len2;
 			ext4_es_store_pblock_status(&newes, block,
@@ -1546,8 +1594,7 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 		} else {
 			es->es_lblk = end + 1;
 			es->es_len = len2;
-			if (ext4_es_is_written(es) ||
-			    ext4_es_is_unwritten(es)) {
+			if (ext4_es_is_mapped(es)) {
 				block = orig_es.es_pblk + orig_es.es_len - len2;
 				ext4_es_store_pblock(es, block);
 			}
@@ -1562,6 +1609,7 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 		if (count_reserved)
 			count_rsvd(inode, lblk, orig_es.es_len - len1,
 				   &orig_es, &rc);
+next:
 		node = rb_next(&es->rb_node);
 		if (node)
 			es = rb_entry(node, struct extent_status, rb_node);
@@ -1577,7 +1625,12 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 			count_rsvd(inode, es->es_lblk, es->es_len, es, &rc);
 		node = rb_next(&es->rb_node);
 		rb_erase(&es->rb_node, &tree->root);
-		ext4_es_free_extent(inode, es);
+
+		if (ext4_es_is_convert_pending(es) && preserve_es)
+			has_conv_pending = true;
+		else
+			ext4_es_free_extent(inode, es);
+
 		if (!node) {
 			es = NULL;
 			break;
@@ -1592,19 +1645,26 @@ static int __es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
 		if (err)
 			return err;
 
+		if (ext4_es_is_convert_pending(es) && preserve_es) {
+			has_conv_pending = true;
+			goto out;
+		}
+
 		len1 = ext4_es_end(es) - end;
 		if (count_reserved)
 			count_rsvd(inode, es->es_lblk, orig_len - len1,
 				   es, &rc);
 		es->es_lblk = end + 1;
 		es->es_len = len1;
-		if (ext4_es_is_written(es) || ext4_es_is_unwritten(es)) {
+		if (ext4_es_is_mapped(es)) {
 			block = es->es_pblk + orig_len - len1;
 			ext4_es_store_pblock(es, block);
 		}
 	}
 
 out:
+	if (preserve_conv_pending && has_conv_pending)
+		*preserve_conv_pending = true;
 	if (count_reserved)
 		*reserved = get_rsvd(inode, end, es, &rc);
 	return 0;
@@ -1649,7 +1709,7 @@ retry:
 	 * is reclaimed.
 	 */
 	write_lock(&EXT4_I(inode)->i_es_lock);
-	err = __es_remove_extent(inode, lblk, end, 0, &reserved, NULL, es);
+	err = __es_remove_extent(inode, lblk, end, 0, &reserved, NULL, es, NULL);
 	if (err)
 		goto error;
 	/* Free preallocated extent if it didn't get used. */
@@ -2241,7 +2301,7 @@ retry:
 	}
 	write_lock(&EXT4_I(inode)->i_es_lock);
 
-	err1 = __es_remove_extent(inode, lblk, end, 0, NULL, NULL, es1);
+	err1 = __es_remove_extent(inode, lblk, end, 0, NULL, NULL, es1, NULL);
 	if (err1 != 0)
 		goto error;
 	/* Free preallocated extent if it didn't get used. */

@@ -738,6 +738,12 @@ enum {
 #define EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF	0x1000
 
 /*
+ * This range will get converted from unwritten to written soon due to endio
+ * conversion.
+ */
+#define EXT4_GET_BLOCKS_CONVERT_PENDING 0x2000
+
+/*
  * The bit position of these flags must not overlap with any of the
  * EXT4_GET_BLOCKS_*.  They are used by ext4_find_extent(),
  * read_extent_tree_block(), ext4_split_extent_at(),
@@ -755,7 +761,8 @@ enum {
  */
 #define EXT4_EX_QUERY_FILTER	(EXT4_EX_NOCACHE | EXT4_EX_FORCE_CACHE |\
 				 EXT4_EX_NOFAIL |\
-				 EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF)
+				 EXT4_GET_BLOCKS_QUERY_LAST_IN_LEAF |\
+				 EXT4_GET_BLOCKS_CONVERT_PENDING)
 
 /*
  * Flags used by ext4_free_blocks
