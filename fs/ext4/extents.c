@@ -3348,15 +3348,15 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 	/* Check left side */
 	lblk = ee_block;
 	len = map->m_lblk - ee_block;
-	if (len && ext4_es_scan_range(inode, &ext4_es_is_convert_pending, lblk,
-				      lblk + len - 1))
+	if (len > 0 && ext4_es_scan_range(inode, &ext4_es_is_convert_pending,
+					  lblk, lblk + len - 1))
 		return -EINVAL;
 
 	/* Check right side */
 	lblk = map_end;
-	len = ex_end - map_end;
-	if (len && ext4_es_scan_range(inode, &ext4_es_is_convert_pending, lblk,
-				      lblk + len - 1))
+	len = ex_end > map_end ? ex_end - map_end : 0;
+	if (len > 0 && ext4_es_scan_range(inode, &ext4_es_is_convert_pending,
+					  lblk, lblk + len - 1))
 		return -EINVAL;
 
 	lblk = 0;
