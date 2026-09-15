@@ -3387,6 +3387,9 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 				/* ZEROOUT failed, just return original error */
 				return err;
 
+			ext4_es_insert_extent(inode, lblk, len, pblk,
+					      EXTENT_STATUS_WRITTEN, false);
+
 			map->m_lblk = lblk;
 			map->m_len += len;
 		}
@@ -3404,6 +3407,9 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 			if (err)
 				/* ZEROOUT failed, just return original error */
 				return err;
+
+			ext4_es_insert_extent(inode, lblk, len, pblk,
+					      EXTENT_STATUS_WRITTEN, false);
 		}
 	} else if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN) {
 		/*
@@ -3427,6 +3433,9 @@ static int ext4_split_extent_zeroout(handle_t *handle, struct inode *inode,
 		if (err)
 			/* ZEROOUT failed, just return original error */
 			return err;
+
+		ext4_es_insert_extent(inode, lblk, len, pblk,
+					EXTENT_STATUS_WRITTEN, false);
 	} else {
 		/*
 		 * We no longer perform unwritten to unwritten splits in IO paths.
@@ -3889,6 +3898,10 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 	struct ext4_map_blocks split_map = *map;
 
+	/* offset and length used while adding extent to es cache */
+	unsigned int es_lblk = map->m_lblk;
+	unsigned int es_len = map->m_len;
+
 	ext_debug(inode, "logical block %llu, max_blocks %u\n",
 		  (unsigned long long)map->m_lblk, map->m_len);
 
@@ -4009,13 +4022,11 @@ convert:
 	 * the bigger merged one.
 	 */
 es_update:
-	ext4_es_insert_extent(inode, le32_to_cpu(ex->ee_block),
-				ext4_ext_get_actual_len(ex),
-				ext4_ext_pblock(ex),
-				ext4_ext_is_unwritten(ex) ?
-					EXTENT_STATUS_UNWRITTEN :
-					EXTENT_STATUS_WRITTEN,
-				false);
+	ext4_es_insert_extent(inode, map->m_lblk, map->m_len, map->m_pblk,
+			      ext4_ext_is_unwritten(ex) ?
+				      EXTENT_STATUS_UNWRITTEN :
+				      EXTENT_STATUS_WRITTEN,
+			      false);
 
 err:
 	if (err) {
