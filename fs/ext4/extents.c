@@ -3973,11 +3973,6 @@ convert:
 	depth = ext_depth(inode);
 	ex = path[depth].p_ext;
 
-	trace_ext4_extent_convert(inode, map,
-			le32_to_cpu(ex->ee_block),
-			ext4_ext_get_actual_len(ex),
-			flags, ext4_ext_is_unwritten(ex));
-
 	/*
 	 * Conversion is already handled in case of zeroout
 	 */
@@ -4013,6 +4008,14 @@ convert:
 					flags | EXT4_EX_NOCACHE);
 		if (IS_ERR(path))
 			return path;
+
+		depth = ext_depth(inode);
+		ex = path[depth].p_ext;
+
+		trace_ext4_extent_convert(inode, map,
+				le32_to_cpu(ex->ee_block),
+				ext4_ext_get_actual_len(ex),
+				flags, ext4_ext_is_unwritten(ex));
 	}
 
 	/*
