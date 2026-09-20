@@ -3897,6 +3897,7 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
 	bool did_zeroout = false;
 	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 	struct ext4_map_blocks split_map = *map;
+	int ex_end;
 
 	/* offset and length used while adding extent to es cache */
 	unsigned int es_lblk = map->m_lblk;
@@ -4025,7 +4026,10 @@ convert:
 	 * the bigger merged one.
 	 */
 es_update:
-	ext4_es_insert_extent(inode, map->m_lblk, map->m_len, map->m_pblk,
+	ex_end = ex->ee_block + ext4_ext_get_actual_len(ex);
+	ext4_es_insert_extent(inode, map->m_lblk,
+			      min(map->m_len, ex_end - map->m_lblk),
+			      map->m_pblk,
 			      ext4_ext_is_unwritten(ex) ?
 				      EXTENT_STATUS_UNWRITTEN :
 				      EXTENT_STATUS_WRITTEN,
